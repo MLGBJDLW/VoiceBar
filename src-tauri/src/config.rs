@@ -82,11 +82,15 @@ impl Default for Injection {
 #[serde(rename_all = "camelCase", default)]
 pub struct AppConfig { pub provider:ProviderConfig, pub correction:CorrectionConfig, pub appearance:Appearance,
     pub injection:Injection, pub hotkey:String, pub cancel_hotkey:String, pub mic_device:String, pub max_recording_secs:u64,
+    /// "auto" (default) checks once per launch, "manual" only on request,
+    /// "off" never — an update check reaches github.com, so it is user-visible.
+    pub update_check:String,
     pub autostart:bool, pub history_enabled:bool, pub hotwords:Vec<String> }
 impl Default for AppConfig {
     fn default() -> Self { Self { provider:ProviderConfig::default(), correction:CorrectionConfig::default(),
         appearance:Appearance::default(), injection:Injection::default(), hotkey:HOTKEY_HINT.into(),
         cancel_hotkey:"Escape".into(), mic_device:String::new(), max_recording_secs:300,
+        update_check:"auto".into(),
         autostart:false, history_enabled:false, hotwords:vec![] } }
 }
 impl AppConfig {
@@ -138,6 +142,7 @@ impl AppConfig {
         if !(5..=900).contains(&self.max_recording_secs) { return Err("录音时间应为 5–900 秒".into()); }
         if self.hotwords.len()>256 || self.hotwords.iter().any(|w|w.len()>256 || w.contains(['\r','\n'])) { return Err("词典过长或含换行".into()); }
         if self.hotkey.trim().is_empty() { return Err("全局快捷键不能为空".into()); }
+        if !["auto","manual","off"].contains(&self.update_check.as_str()) { return Err("无效的更新检查设置".into()); }
         if !self.cancel_hotkey.is_empty() && self.cancel_hotkey.eq_ignore_ascii_case(&self.hotkey) {
             return Err("取消快捷键不能与开始/结束快捷键相同".into());
         }
@@ -230,6 +235,13 @@ mod tests {
         c.hotkey="F8".into();c.cancel_hotkey=String::new();
         assert_eq!(c.hotkeys(),("f8".into(),None));
         assert!(c.validate().is_ok(),"a shortcut without modifiers is accepted; the shortcut backend decides usability");
+    }
+    #[test] fn update_check_setting_defaults_to_auto_and_rejects_typos() {
+        let mut c=AppConfig::default();
+        assert_eq!(c.update_check,"auto");
+        for mode in ["auto","manual","off"] { c.update_check=mode.into(); c.validate().unwrap(); }
+        c.update_check="sometimes".into();
+        assert!(c.validate().unwrap_err().contains("更新检查"));
     }
     #[test] fn autostart_defaults_off_and_survives_roundtrip() {
         assert!(!AppConfig::default().autostart);

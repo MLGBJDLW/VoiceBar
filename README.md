@@ -100,7 +100,7 @@ npm ci
 npm run dev          # 浏览器里预览界面（不能录音）
 npm run tauri dev    # 完整桌面开发
 npm run build        # 类型检查 + 前端构建
-npm test             # 前端测试（声浪 + 快捷键录制）+ Rust 测试
+npm test             # 前端测试（声浪 / 快捷键录制 / 更新清单）+ Rust 测试
 ```
 
 正式构建安装包（测试 → NSIS/MSI 安装包 → 按上限清理缓存）：
@@ -110,15 +110,34 @@ powershell -ExecutionPolicy Bypass -File scripts/build.ps1                 # 安
 powershell -ExecutionPolicy Bypass -File scripts/build.ps1 -Mode portable # 只产出根目录 VoiceBar.exe
 ```
 
+本地要产出**可签名**的更新包时，构建前设置 `TAURI_SIGNING_PRIVATE_KEY`（私钥文件内容）与 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`，Tauri 会在 `target/release/bundle/nsis/` 生成 `*.exe.sig`；再用脚本生成清单：
+
+```powershell
+node scripts/make-latest-json.mjs --tag v0.2.0 --repo MLGBJDLW/VoiceBar `
+  --bundle target/release/bundle/nsis/VoiceBar_0.2.0_x64-setup.exe --out latest.json
+node scripts/verify-release.mjs --manifest latest.json --assets-dir docs/release/0.2.0 `
+  --tag v0.2.0 --repo MLGBJDLW/VoiceBar
+```
+
 生产构建必须启用 `custom-protocol` 把前端嵌入 exe；`tauri.conf.json` 已固定该 feature，遗漏会被编译期检查拦住。图标由 `node scripts/render-icons.mjs` 从 `src-tauri/icons/app-icon.svg` 生成（也可在 Actions 里运行 **Icons** 工作流），不依赖浏览器。前端 `npm run dev` 只监听本机 1420 端口。
 
-贡献前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md) 与 [安全策略](SECURITY.md)。实测范围与尚未验证的项目见 [验证记录](docs/verification.md)；仓库一次性配置（发布令牌等）见 [GitHub 设置清单](docs/github-setup.md)。
+贡献前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md) 与 [安全策略](SECURITY.md)。实测范围与尚未验证的项目见 [验证记录](docs/verification.md)；仓库一次性配置（发布令牌、更新密钥）见 [GitHub 设置清单](docs/github-setup.md)。
+
+## 应用内更新
+
+设置页「概览」底部有一张更新卡片：显示当前版本、一键「检查更新」、发现新版本后列出更新说明并可「下载并重启」，另有「启动时检查更新 / 仅手动 / 从不」三档开关（默认**启动时检查**，只向 `github.com` 读取清单，不上传任何本地数据）。
+
+- **清单来源**：固定地址 `https://github.com/MLGBJDLW/VoiceBar/releases/latest/download/latest.json`，由 Release 工作流在打包后用私钥签名安装包、计算 SHA-256 生成并上传。
+- **校验**：Tauri 在下载阶段用编译进程序的 minisign 公钥验签，签名同时绑定版本号，防止「新版本号 + 旧安装包」的替换攻击；发布前 CI 还会再校验一次清单与安装包的哈希是否一致。
+- **适用范围**：只有 **NSIS 安装版**（装在 `%LOCALAPPDATA%\VoiceBar`）能原地更新。便携版、MSI 安装版和开发构建会明确提示无法自更新并给出手动下载入口，不会假装修复成功。
 
 ## 发布与版本
 
 - **版本号来源**：`src-tauri/Cargo.toml`（Rust crate 版本）。`package.json` 与 `src-tauri/tauri.conf.json` 必须与之相同，CI 会检查；release-plz 会同步更新并提交 lockfile。
-- **发版自动化**：[release-plz](https://release-plz.dev) 监听 `main`：按 Conventional Commits 生成 `CHANGELOG.md` 和版本更新 PR；该 PR 合入后创建 `vX.Y.Z` 标签和草稿 Release，GitHub Actions 在 Windows runner 上构建 NSIS/MSI 安装包、校验资产齐全后转为正式发布。
-- **一次性配置**：在仓库 Settings → Secrets 添加 `RELEASE_PLZ_TOKEN`（具备 `contents: write` 的 PAT），否则 release-plz 创建的标签无法触发后续工作流。
+- **发版自动化**：[release-plz](https://release-plz.dev) 监听 `main`：按 Conventional Commits 生成 `CHANGELOG.md` 和版本更新 PR；该 PR 合入后创建 `vX.Y.Z` 标签和草稿 Release，GitHub Actions 在 Windows runner 上构建 NSIS/MSI 安装包、生成签名与 `latest.json`、校验后转为正式发布。
+- **一次性配置**：在仓库 Settings → Secrets 添加
+  - `RELEASE_PLZ_TOKEN`（具备 `contents: write` 的 PAT），否则 release-plz 创建的标签无法触发后续工作流；
+  - `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`（应用内更新签名；缺失时不生成 `latest.json`，更新功能会提示「还没有可用的更新包」）。
 
 详细步骤见 [CONTRIBUTING.md 的发布流程](CONTRIBUTING.md#发布流程维护者)。
 

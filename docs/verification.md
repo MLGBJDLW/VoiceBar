@@ -2,6 +2,33 @@
 
 日期：2026-10-16 至 2026-10-26。Windows 11 x64 / Rust 1.99（x86_64-pc-windows-gnu）/ Node 24.16。
 
+## 应用内更新（2026-10-26 续）
+
+改动：接入 `tauri-plugin-updater`（仅 Rust 侧，无 JS 契约）；设置页「概览」新增更新卡片；Release 工作流签名并生成/上传 `latest.json`；新增 `scripts/make-latest-json.mjs` 与 `scripts/verify-release.mjs`。
+
+已通过的检查：
+
+| 检查 | 证据 |
+|---|---|
+| Rust 单测（更新模块） | `cargo test updater`：4 passed（feed 为 https 且指向 latest 资产、公钥可解出 minisign 公钥、非安装版不自称可更新、错误文案短且有指引） |
+| Rust 单测（配置） | 新增 `update_check_setting_defaults_to_auto_and_rejects_typos`；全套 **36 passed / 0 failed** |
+| 前端单测 | 声浪 15 + 快捷键 5 + 更新清单 11（含篡改哈希、缺平台、跨仓库 URL、版本不符、缺 MSI 五个负向用例），共 31 passed |
+| 真实签名链路 | 用生成的私钥对 2,306,248 字节的 NSIS 安装包执行 `tauri signer sign --app-version 0.1.0`，`.sig` 解码后 trusted comment 含 `version:0.1.0`，`latest.json` 的 signature 为 436 字符 base64 |
+| 真实校验链路 | `verify-release.mjs` 对真实安装包 + MSI 通过；把安装包末字节翻转后报 `sha256 不匹配` 并以退出码 1 失败 |
+| 设置页 UI | 无头 Chromium + CDP 打开构建产物：更新卡片存在、按钮可点、检查后状态变 `ok`、安装按钮在无更新时保持隐藏、切到「从不检查」后把设置标记为未保存 |
+| 响应式 | 2500px 宽：卡片宽 996px（受 `max-width` 约束）、无横向滚动；760px 宽：`.update-row` 变 `column`、无横向溢出 |
+
+途中发现并修复的真实缺陷（与更新无关，但由本轮测试暴露）：
+
+- **本机代理污染回环探测**：本机系统代理会把 `localhost` 的上游请求转发出去，返回 502，导致 `http_adapters_map_rejected_endpoints_and_reachable_whitelist` 与 `refused_loopback_is_not_reported_as_bad_key_for_every_kind` 误判为服务端错误。现在批量转写、连接测试与校对三个 HTTP 客户端在目标为本机回环地址时都设置 `no_proxy()`，两个测试在默认环境下通过（不再需要清空 `HTTP_PROXY`）。
+- `updater` 依赖按 `~2.14` 固定：Tauri 2.14 起用 `--app-version` 把版本写进签名，并在 `requireSignedVersion` 时校验，防止「新版本号 + 旧安装包」的替换。
+
+尚未验证（保持待验证，不视为通过）：
+
+- 真实 NSIS 安装版在用户机器上的端到端更新：本机没有安装版 VoiceBar，`bundled()` 为 false，卡片只能显示「便携版/开发构建」路径。
+- GitHub Actions 实跑：`tauri-action` 是否确实产出 `*.exe.sig`、`latest.json` 上传与 `verify-release.mjs` 校验在 runner 上的行为。
+- `releases/latest/download/latest.json` 在仓库尚无 Release 时的 404 文案；以及 GitHub 被墙/超时时的提示文案。
+
 ## 0.1.0 发布准备（2026-10-26）
 
 本轮改动：全局快捷键录制式编辑 + 独立「取消本次录音」快捷键；开机自启（HKCU Run）；托盘单击打开设置；单实例冲突处理；安装包（NSIS/MSI）与 release-plz 发版流水线；仓库根 Cargo workspace；图标改为程序化生成。

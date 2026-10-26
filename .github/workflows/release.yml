@@ -109,6 +109,8 @@ jobs:
     timeout-minutes: 60
     env:
       CARGO_INCREMENTAL: '0'
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -126,13 +128,11 @@ jobs:
         run: npm ci --no-audit --no-fund
       - name: 测试（同一提交必须先通过）
         run: npm test
+      # Produces the NSIS installer plus its updater signature. With
+      # createUpdaterArtifacts="v1Compatible" the installer itself is signed
+      # (no extra .zip), which is what latest.json points at.
       - name: 构建并上传到草稿 Release
         uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          # 可选：配置签名后自动生成 .sig 并随安装包上传。
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ needs.create-release.outputs.tag }}
           releaseName: 'VoiceBar ${{ needs.create-release.outputs.tag }}'
@@ -141,16 +141,59 @@ jobs:
           prerelease: false
           args: ${{ matrix.platform.args }}
 
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.create-release.outputs.tag }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: 下载已上传的安装包
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist-assets
+          gh release download "${{ needs.create-release.outputs.tag }}" \
+            --repo "${{ github.repository }}" \
+            --pattern "*x64-setup.exe" --dir dist-assets
+          ls -l dist-assets
+      - name: 生成 latest.json（签名 + 哈希 + 下载地址）
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          npm ci --no-audit --no-fund
+          bundle=$(ls dist-assets/VoiceBar_*x64-setup.exe | head -n1)
+          node scripts/make-latest-json.mjs \
+            --tag "${{ needs.create-release.outputs.tag }}" --repo "${{ github.repository }}" \
+            --bundle "$bundle" --out latest.json
+          cat latest.json
+      - name: 上传 latest.json 到草稿 Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release upload "${{ needs.create-release.outputs.tag }}" latest.json \
+            --repo "${{ github.repository }}" --clobber
+
   publish:
     name: 草稿转为正式 Release
     needs: [create-release, build]
     if: needs.create-release.outputs.should-build == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    runs-on: windows-latest
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:
-      - name: 校验资产齐全后发布
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.create-release.outputs.tag }}
+      - name: 校验资产与更新清单
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -169,5 +212,19 @@ jobs:
             fi
           done
           [ "$missing" = 0 ] || exit 1
+          # If a signing key is configured, the updater manifest is mandatory and
+          # must agree with the published installer, otherwise clients would
+          # either never update or fail signature verification after download.
+          if [ -n "${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}" ]; then
+            if ! grep -q '^latest.json$' <<<"$assets"; then
+              echo "::error::缺少 latest.json（已配置签名密钥，应用内更新依赖该文件）"
+              exit 1
+            fi
+            mkdir -p verify
+            gh release download "$TAG" --repo "$REPO" --pattern "latest.json" --dir verify
+            gh release download "$TAG" --repo "$REPO" --pattern "*x64-setup.exe" --dir verify
+            node scripts/verify-release.mjs --manifest verify/latest.json --assets-dir verify \
+              --tag "$TAG" --repo "$REPO"
+          fi
           gh api -X PATCH "repos/$REPO/releases/$RELEASE_ID" -F draft=false >/dev/null
           echo "已发布：https://github.com/$REPO/releases/tag/$TAG"

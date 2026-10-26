@@ -9,7 +9,8 @@
     "tauri": "tauri",
     "test:effects": "node --test tests/effects.test.mjs",
     "test:shortcut": "node --test tests/shortcut.test.mjs",
-    "test:frontend": "npm run test:effects && npm run test:shortcut",
+    "test:update": "node --test tests/update-manifest.test.mjs",
+    "test:frontend": "npm run test:effects && npm run test:shortcut && npm run test:update",
     "test": "npm run test:frontend && cargo test --manifest-path src-tauri/Cargo.toml"
   },
   "dependencies": {

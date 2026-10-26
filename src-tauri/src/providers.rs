@@ -197,7 +197,10 @@ pub async fn check_connection(mut config:ProviderConfig)->Result<String> {
     config.normalize();config.validate_for_use().map_err(|e|anyhow!(e))?;
     let result=async {
         if config.is_batch() {
-            let client=reqwest::Client::builder().timeout(Duration::from_secs(10)).redirect(reqwest::redirect::Policy::none()).build()?;
+            // Same rule as recording: never route a loopback probe through a proxy.
+            let mut builder=reqwest::Client::builder().timeout(Duration::from_secs(10)).redirect(reqwest::redirect::Policy::none());
+            if crate::config::is_loopback_endpoint(&config.endpoint) {builder=builder.no_proxy();}
+            let client=builder.build()?;
             let mut request=client.get(&config.endpoint);
             if !config.api_key.is_empty(){request=request.bearer_auth(&config.api_key);}
             let response=request.send().await.map_err(|e|anyhow!(crate::service_error::http_request(config.name(),&config.endpoint,&e)))?;
@@ -322,7 +325,12 @@ async fn batch(config:ProviderConfig,hotwords:Vec<String>,mut audio:mpsc::Receiv
     if config.kind!="whispercpp"{form=form.text("model",config.model.clone());}
     if !config.language.is_empty()&&config.language!="auto"{form=form.text("language",config.language.clone());}
     if !hotwords.is_empty(){form=form.text("prompt",hotwords.join(", "));}
-    let client=reqwest::Client::builder().timeout(Duration::from_secs(120)).redirect(reqwest::redirect::Policy::none()).build()?;
+    // A system proxy must not intercept a loopback service: corporate proxies and
+    // local capture tools answer 502 for localhost, which surfaced as a bogus
+    // service error. `no_proxy` also follows the OS proxy settings on Windows.
+    let mut builder=reqwest::Client::builder().timeout(Duration::from_secs(120)).redirect(reqwest::redirect::Policy::none());
+    if crate::config::is_loopback_endpoint(&config.endpoint) {builder=builder.no_proxy();}
+    let client=builder.build()?;
     let mut request=client.post(&config.endpoint).multipart(form);
     if !config.api_key.is_empty(){request=request.bearer_auth(&config.api_key);}
     let response=request.send().await.map_err(|e|anyhow!(crate::service_error::http_request(config.name(),&config.endpoint,&e)))?;

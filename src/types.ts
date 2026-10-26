@@ -36,6 +36,8 @@ export interface AppConfig {
   hotkey: string;
   cancelHotkey: string;
   micDevice: string;
+  /** 'auto' checks on launch, 'manual' only when asked, 'off' never. */
+  updateCheck: 'auto' | 'manual' | 'off';
   maxRecordingSecs: number;
   autostart: boolean;
   historyEnabled: boolean;

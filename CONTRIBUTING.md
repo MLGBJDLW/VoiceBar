@@ -44,7 +44,10 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 1. PR 合入 `main` 后，release-plz 自动更新 `CHANGELOG.md`、各 `Cargo.toml` / `Cargo.lock`、`package.json` 与 `tauri.conf.json` 的版本，并开一个 `chore: release vX.Y.Z` PR。
 2. 合入该 PR 后，release-plz 创建 `vX.Y.Z` 标签与 GitHub Release 草稿，构建工作流被触发。
-3. 工作流在 Windows runner 上构建 NSIS/MSI 安装包并上传；全部构建成功后，另一个任务校验 `x64-setup.exe` 与 `x64_en-US.msi` 齐全，再把草稿发布为正式 Release。
-4. 发布前可本地预演：`cargo install release-plz` 后运行 `release-plz update`，检查生成的 diff；安装包可用 `scripts/build.ps1` 复现。
+3. 工作流在 Windows runner 上构建 NSIS/MSI 安装包并上传；已配置签名密钥时还会用 `scripts/make-latest-json.mjs` 生成 `latest.json` 一并上传。
+4. 发布前的校验任务会核对 `x64-setup.exe`、`x64_en-US.msi` 是否齐全；有签名密钥时再运行 `scripts/verify-release.mjs`，确认 `latest.json` 的版本、下载地址与安装包 SHA-256 完全一致，任何一项不符都拒绝发布。
+5. 发布前可本地预演：`cargo install release-plz` 后运行 `release-plz update`，检查生成的 diff；安装包可用 `scripts/build.ps1` 复现。
+
+**不要**：手改已发布 Release 的 `latest.json` 或把旧版本标为 latest——应用内更新固定读取 `releases/latest/download/latest.json`。
 
 如需手动发布，在 Actions → **Release** → Run workflow 填入已有标签即可重新构建并上传。

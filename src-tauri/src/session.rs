@@ -157,7 +157,10 @@ async fn update_transcript(app:&tauri::AppHandle,config:&AppConfig,delivery:&mut
     *current=update;
 }
 async fn correct(config:&AppConfig,text:&str)->Result<String,String>{
-    let client=reqwest::Client::builder().timeout(Duration::from_secs(20)).redirect(reqwest::redirect::Policy::none()).build().map_err(|e|e.to_string())?;
+    let mut builder=reqwest::Client::builder().timeout(Duration::from_secs(20)).redirect(reqwest::redirect::Policy::none());
+    // Local correction servers must not be routed through a system proxy either.
+    if crate::config::is_loopback_endpoint(&config.correction.endpoint) {builder=builder.no_proxy();}
+    let client=builder.build().map_err(|e|e.to_string())?;
     let mut request=client.post(&config.correction.endpoint)
         .json(&serde_json::json!({"model":config.correction.model,"temperature":0,"messages":[
             {"role":"system","content":config.correction.prompt},{"role":"user","content":text}]}));

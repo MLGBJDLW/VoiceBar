@@ -144,6 +144,21 @@ async function settings() {
             <article><span class="feature-number">03 / QUIETLY THERE</span><h3>安静待命</h3><p>关闭设置后收起界面。<br>录音结束，释放音频与连接。</p><span class="quiet-line"><i></i> 按需唤醒的原生后台</span></article>
           </div>
           <div class="transcript-card"><div class="section-line"><span>本次识别 <small id="recognition-mode"></small></span><button class="subtle-button" id="copy-result">${copyIcon} 复制</button></div><p id="result-text">你的文字会出现在这里。暂定片段会随识别结果更新。</p><span class="result-status" id="result-status">尚未开始录音</span></div>
+          <div class="update-card" id="update-card">
+            <div class="update-row">
+              <div class="update-copy">
+                <strong>版本与更新</strong>
+                <span class="update-version" id="update-version">VOICEBAR</span>
+                <p id="update-status" role="status" aria-live="polite">正在读取版本信息…</p>
+              </div>
+              <div class="update-actions">
+                <button class="button" id="update-check" type="button">检查更新</button>
+                <button class="button primary" id="update-install" type="button" hidden>下载并重启</button>
+              </div>
+            </div>
+            <p class="update-notes" id="update-notes" hidden></p>
+            <label class="update-pref"><span>启动时检查更新</span><select id="update-pref" aria-label="启动时检查更新"><option value="auto">每次启动检查</option><option value="manual">仅手动检查</option><option value="off">从不检查</option></select></label>
+          </div>
         </section>
         <section class="panel" id="panel-appearance">
           <div class="section-line"><h2>从你喜欢的位置出现</h2><span class="muted">跟随鼠标所在显示器</span></div>
@@ -233,8 +248,78 @@ async function settings() {
   }
   const prefix=native?'':'PREVIEW ';
   const versionLabel=document.querySelector('.version')!;
-  if(native){invoke('get_runtime_info').then(i=>{versionLabel.textContent=`VOICEBAR / ${i.version||''}`;}).catch(()=>{versionLabel.textContent=`VOICEBAR / ${prefix}0.1.0`;});}
-  else versionLabel.textContent=`VOICEBAR / 0.1.0`;
+  if(!native) versionLabel.textContent=`VOICEBAR / 0.1.0`;
+
+  // --- Updates -------------------------------------------------------------
+  // State lives in the Rust side (signature check, endpoint); this only renders
+  // it. A build that cannot self-update says so instead of failing after click.
+  type UpdateInfo={currentVersion:string;available:boolean;version?:string|null;notes?:string|null;date?:string|null};
+  type Support={selfUpdate:boolean;currentVersion:string};
+  let updateBusy=false;
+  let updateState:''|'ok'|'warn'|'error'='';
+  function renderUpdate(status:string,state:''|'ok'|'warn'|'error'=updateState) {
+    updateState=state;
+    const el=$('update-status');
+    el.textContent=status;
+    el.dataset.state=state;
+    $<HTMLButtonElement>('update-check').disabled=updateBusy;
+    $<HTMLButtonElement>('update-install').disabled=updateBusy;
+  }
+  function showRelease(info:UpdateInfo) {
+    const notes=(info.notes||'').trim();
+    $('update-notes').hidden=!notes;
+    $('update-notes').textContent=notes.slice(0,1200);
+    $<HTMLButtonElement>('update-install').hidden=false;
+    renderUpdate(`有新版本 ${info.version}${info.date?' · '+info.date.slice(0,10):''}，下载完成后自动重启。`,'ok');
+  }
+  function hideRelease() {
+    $('update-notes').hidden=true;
+    $<HTMLButtonElement>('update-install').hidden=true;
+  }
+  if(native){
+    // The Rust side knows whether this binary is an installed build with a
+    // signing key; show the truth instead of a button that always fails.
+    const support:Support=await invoke('update_support').catch(()=>({selfUpdate:native,currentVersion:''}));
+    versionLabel.textContent=`VOICEBAR / ${support.currentVersion||prefix+'0.1.0'}`;
+    $('update-version').textContent=`VOICEBAR / ${support.currentVersion||'未知版本'}`;
+    $<HTMLSelectElement>('update-pref').value=config.updateCheck||'auto';
+    renderUpdate(support.selfUpdate
+      ? '尚未检查。检查只从 github.com 读取发布信息，不上传任何本地数据。'
+      : '当前为便携版或开发构建，无法原地更新。请从 GitHub Releases 下载安装包覆盖安装；用 NSIS 安装版运行时会自动检查。',
+      support.selfUpdate?'':'warn');
+    // Launch-time checks arrive as events, so the card reflects them without a click.
+    await listen('voicebar://update',e=>{const info=e.payload as UpdateInfo;if(info?.available)showRelease(info);});
+  } else {
+    $('update-version').textContent=`VOICEBAR / ${prefix}0.1.0`;
+    $<HTMLSelectElement>('update-pref').value=config.updateCheck||'auto';
+    renderUpdate('浏览器预览无法检查更新，请在桌面版中试用。','warn');
+  }
+  $('update-check').onclick=async()=>{
+    if(updateBusy)return;
+    updateBusy=true;hideRelease();renderUpdate('正在检查…');
+    try{
+      const info:UpdateInfo=await invoke('check_for_update');
+      if(info.available)showRelease(info);
+      else renderUpdate(`已是最新版本（${info.currentVersion}）。`,'ok');
+    }catch(e){renderUpdate(String(e),'error');}
+    finally{updateBusy=false;renderUpdate($('update-status').textContent||'',updateState);}
+  };
+  $('update-install').onclick=async()=>{
+    if(updateBusy)return;
+    if(!confirm('将下载并安装更新，VoiceBar 会自动重启；正在进行的录音会被取消。继续吗？'))return;
+    updateBusy=true;renderUpdate('正在下载并校验签名，完成后自动重启…');
+    try{
+      await invoke('install_update');
+      // install_update restarts the app; reaching here usually means it is about to exit.
+      renderUpdate('更新已安装，正在重启…','ok');
+    }catch(e){updateBusy=false;renderUpdate(String(e),'error');}
+  };
+  $<HTMLSelectElement>('update-pref').onchange=e=>{
+    config.updateCheck=(e.target as HTMLSelectElement).value as AppConfig['updateCheck'];
+    $('save').classList.add('unsaved');
+    renderUpdate(config.updateCheck==='auto'?'已选择启动时检查；保存设置后生效。'
+      :config.updateCheck==='off'?'已关闭自动检查；仍可点击「检查更新」。':'仅在你点击时检查更新；保存设置后生效。');
+  };
   function shortcutLabel(value:string) {
     const accel=parseAccel(value);
     return accel?displayAccel(accel):(value||'未设置');

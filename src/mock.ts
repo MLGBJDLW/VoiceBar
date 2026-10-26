@@ -4,7 +4,7 @@ const initial: AppConfig = {
   provider:{kind:'funasr',endpoint:'ws://localhost:10095',model:'paraformer',apiKey:'',appId:'',apiSecret:'',language:'zh'},
   correction:{enabled:false,endpoint:'https://api.openai.com/v1/chat/completions',apiKey:'',model:'gpt-4o-mini',prompt:'只校对语音转写中的错别字和标点，保留原意，只输出修正后的文本。'},
   appearance:{anchor:'top',effect:'ribbon',accent:'#a7e8cf',opacity:0.94,intensity:1,scale:1,motion:'full',fps:30,combine:true,offsetX:0,offsetY:0},
-  injection:{mode:'final',method:'unicode',correctionAtEnd:false},hotkey:'Ctrl+Alt+Space',cancelHotkey:'Escape',micDevice:'',maxRecordingSecs:300,autostart:false,historyEnabled:false,hotwords:[]
+  injection:{mode:'final',method:'unicode',correctionAtEnd:false},hotkey:'Ctrl+Alt+Space',cancelHotkey:'Escape',micDevice:'',updateCheck:'auto',maxRecordingSecs:300,autostart:false,historyEnabled:false,hotwords:[]
 };
 let current = structuredClone(initial);
 try {
@@ -29,6 +29,10 @@ export async function mockInvoke(cmd: string, args?: any): Promise<any> {
     case 'list_microphones': return [];
     case 'autostart_info': return {enabled:Boolean(current.autostart),command:'"C:\\Program Files\\VoiceBar\\VoiceBar.exe" --hidden',hint:'Ctrl+Alt+Space'};
     case 'get_runtime_info': return {version:'0.1.0',recording:false};
+    // Browser preview: no installer, so report honestly that self-update is off.
+    case 'update_support': return {selfUpdate:false,currentVersion:'0.1.0'};
+    case 'check_for_update': return {currentVersion:'0.1.0',available:false,version:null,notes:null,date:null};
+    case 'install_update': throw new Error('浏览器预览无法安装更新，请在安装版 VoiceBar 中操作。');
     case 'preview_overlay': window.open('/?overlay=1','voicebar-preview','width=560,height=210');return;
     case 'copy_transcript': return;
     case 'hide_overlay': window.close();return;

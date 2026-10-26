@@ -9,6 +9,10 @@ mod platform;
 mod providers;
 mod session;
 mod service_error;
+mod updater;
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 
 use config::AppConfig;
 use serde::Serialize;
@@ -16,6 +20,31 @@ use std::sync::{Arc,Mutex};
 use tauri::{Emitter,Manager,WebviewUrl,WebviewWindowBuilder};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt,Shortcut,ShortcutState};
 use tokio::sync::mpsc;
+
+/// Shown by the update buttons when this build cannot self-update.
+pub const UPDATE_UNAVAILABLE: &str = "当前为便携版或开发构建，无法原地更新。请从 GitHub Releases 下载新的安装包覆盖安装；安装版会自动检查更新。";
+
+/// Cheap gate so only one update check / download runs at a time (the button
+/// also disables itself, but two windows could both ask).
+fn checking() -> &'static AtomicBool {
+    static GATE: OnceLock<AtomicBool> = OnceLock::new();
+    GATE.get_or_init(|| AtomicBool::new(false))
+}
+
+/// Clears the gate on drop, including early returns.
+pub struct Gate;
+
+impl Gate {
+    pub fn acquire() -> Option<Gate> {
+        checking().compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).ok().map(|_| Gate)
+    }
+}
+
+impl Drop for Gate {
+    fn drop(&mut self) {
+        checking().store(false, Ordering::SeqCst);
+    }
+}
 
 #[derive(Clone,Debug,Serialize)]
 #[serde(rename_all="camelCase")]
@@ -149,6 +178,11 @@ fn signal_stop(app:&tauri::AppHandle,cancel:bool)->Result<(),String>{
     if let Some(active)=active.as_ref() { let _=active.stop.send(cancel); }
     Ok(())
 }
+/// Used before restarting into a freshly installed build: discard the current
+/// session so nothing is injected into whatever window has focus.
+pub fn signal_stop_current(app:&tauri::AppHandle,cancel:bool){
+    let _=signal_stop(app,cancel);
+}
 #[tauri::command]
 fn preview_overlay(app:tauri::AppHandle)->Result<(),String>{
     let config=app.state::<Arc<Runtime>>().config.lock().unwrap().clone();
@@ -264,6 +298,7 @@ fn main() {
             }else if args.iter().any(|a|a=="--cancel"){let _=signal_stop(app,true);}
             else {let _=settings(app);}
         }))
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_global_shortcut::Builder::new().with_handler(|app,shortcut,event|{
             if event.state!=ShortcutState::Pressed{return;}
             let shortcut=*shortcut;
@@ -330,10 +365,30 @@ fn main() {
                 startup_log("settings ready");
             }
             if let Some(e)=load_error{status(handle,"error",format!("配置读取失败，原文件已保留：{e}"));}
+            // Background check: delayed so a cold start never competes with
+            // window creation, skipped in tray-only mode and when disabled.
+            let check_updates=handle.state::<Arc<Runtime>>().config.lock().unwrap().update_check.clone();
+            if check_updates=="auto" && !hidden && updater::can_self_update() {
+                let app=handle.clone();
+                tauri::async_runtime::spawn(async move{
+                    tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+                    // Spawned tasks never take the manual gate: a user click wins.
+                    match updater::check_quietly(&app).await{
+                        Ok(Some(info))=>{
+                            let version=info.version.clone().unwrap_or_default();
+                            status(&app,"idle",format!("有新版本 {version} 可用，可在「概览」中更新"));
+                            let _=app.emit("voicebar://update",info);
+                        }
+                        Ok(None)=>startup_log("update check: up to date"),
+                        Err(e)=>startup_log(&format!("update check skipped: {e}")),
+                    }
+                });
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![get_config,save_config,get_status,get_transcript,start_recording,
-            stop_recording,cancel_recording,preview_overlay,hide_overlay,open_settings,list_microphones,copy_transcript,get_runtime_info,test_connection,autostart_info])
+            stop_recording,cancel_recording,preview_overlay,hide_overlay,open_settings,list_microphones,copy_transcript,get_runtime_info,test_connection,autostart_info,
+            updater::check_for_update,updater::install_update,updater::update_support])
         .build(tauri::generate_context!());
     match app {
         Ok(app)=>app.run(|_,event|match event {

@@ -31,10 +31,22 @@ if ($LASTEXITCODE -ne 0) { throw 'Rust tests failed' }
 
 if ($Mode -eq 'installer') {
     # Same invocation CI uses, so a local dry run mirrors the GitHub Release.
+    # With TAURI_SIGNING_PRIVATE_KEY(+_PASSWORD) in the environment Tauri also
+    # writes the updater signature next to the NSIS installer.
     & $node $npxCli tauri build --bundles nsis,msi
     if ($LASTEXITCODE -ne 0) { throw 'Installer build failed' }
-    Get-ChildItem -LiteralPath 'target\release\bundle' -Recurse -Include '*.exe', '*.msi' |
+    Get-ChildItem -LiteralPath 'target\release\bundle' -Recurse -Include '*.exe', '*.msi', '*.sig' |
         Select-Object FullName, Length
+    $setup = Get-ChildItem -LiteralPath 'target\release\bundle\nsis' -Filter '*x64-setup.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+    $sig = if ($setup) { "$($setup.FullName).sig" } else { '' }
+    if ($sig -and (Test-Path -LiteralPath $sig)) {
+        Write-Host ''
+        Write-Host 'Updater artifacts detected. Generate the manifest with:'
+        Write-Host ("  node scripts/make-latest-json.mjs --tag v<version> --repo MLGBJDLW/VoiceBar --bundle `"{0}`" --out latest.json" -f $setup.FullName)
+        Write-Host '  node scripts/verify-release.mjs --manifest latest.json --assets-dir <dir-with-installer> --tag v<version> --repo MLGBJDLW/VoiceBar'
+    } elseif (-not $env:TAURI_SIGNING_PRIVATE_KEY) {
+        Write-Host 'No signing key set: the installer is unsigned, so in-app updates stay disabled for this build.'
+    }
 } else {
     & $cargo build --release --features custom-protocol --manifest-path src-tauri/Cargo.toml
     if ($LASTEXITCODE -ne 0) { throw 'Release build failed' }

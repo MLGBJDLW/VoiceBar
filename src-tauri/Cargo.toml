@@ -23,6 +23,11 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-single-instance = "2"
+# In-app updates. Only Rust-side APIs are used, so no JS guest bindings are needed.
+# Pinned: the response `signature` is unsigned, so the updater must also compare
+# it with the version bound into the signature's trusted comment
+# (`requireSignedVersion`); passing `--app-version` at sign time relies on it.
+tauri-plugin-updater = "~2.14"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
