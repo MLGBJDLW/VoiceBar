@@ -74,8 +74,11 @@ jobs:
             fi
             id="$EVENT_RELEASE_ID"
           else
-            json=$(gh api "repos/$REPO/releases/tags/$tag" 2>/dev/null || true)
-            if [ -n "$json" ]; then
+            # `gh api` writes the error body to stdout on 404, so `|| true`
+            # alone left `json` non-empty ('{"message":"Not Found"...}') and
+            # every first release was wrongly reported as already published.
+            # Decide on the HTTP status code instead of on empty output.
+            if json=$(gh api "repos/$REPO/releases/tags/$tag" 2>/dev/null); then
               id=$(echo "$json" | jq -r '.id')
               draft=$(echo "$json" | jq -r '.draft')
               if [ "$draft" != "true" ]; then
@@ -83,6 +86,11 @@ jobs:
                 exit 1
               fi
             else
+              status=$(gh api "repos/$REPO/releases/tags/$tag" 2>&1 >/dev/null | grep -o 'HTTP 404' || true)
+              if [ -z "$status" ]; then
+                echo "::error::读取 Release $tag 失败（既不是存在，也不是 404），先人工确认。"
+                exit 1
+              fi
               id=$(gh api -X POST "repos/$REPO/releases" \
                 -f tag_name="$tag" -f name="VoiceBar $tag" -F draft=true -F prerelease=false | jq -r '.id')
             fi
