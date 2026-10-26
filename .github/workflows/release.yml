@@ -203,8 +203,20 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh release upload "${{ needs.create-release.outputs.release-id }}" latest.json \
-            --repo "${{ github.repository }}" --clobber
+          # Upload through the API: `gh release upload` only takes a tag, and a
+          # duplicate draft made the tag ambiguous. Delete an existing
+          # latest.json first so a re-run can replace it (--clobber equivalent).
+          rel="${{ needs.create-release.outputs.release-id }}"
+          repo="${{ github.repository }}"
+          old=$(gh api "repos/$repo/releases/$rel/assets" \
+                  --jq '.[] | select(.name == "latest.json") | .id' || true)
+          if [ -n "$old" ]; then
+            gh api -X DELETE "repos/$repo/releases/assets/$old"
+          fi
+          # Uploads must go to the dedicated host; api.github.com answers 404.
+          gh api --method POST "https://uploads.github.com/repos/$repo/releases/$rel/assets?name=latest.json" \
+            -H 'Content-Type: application/octet-stream' --input latest.json >/dev/null
+          gh api "repos/$repo/releases/$rel" --jq '.assets[].name' | sort
 
   publish:
     name: 草稿转为正式 Release
