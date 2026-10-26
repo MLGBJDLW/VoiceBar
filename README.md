@@ -133,7 +133,7 @@ node scripts/verify-release.mjs --manifest latest.json --assets-dir docs/release
 
 ## 发布与版本
 
-- **版本号来源**：`src-tauri/Cargo.toml`（Rust crate 版本）。`package.json` 与 `src-tauri/tauri.conf.json` 必须与之相同，CI 会检查；release-plz 会同步更新并提交 lockfile。
+- **版本号来源**：`src-tauri/Cargo.toml`（Rust crate 版本）。`package.json` 与 `src-tauri/tauri.conf.json` 必须与之相同，CI 会检查；release-plz 会同步更新并提交锁文件——Rust 只有仓库根目录的 `Cargo.lock`（workspace 根在根目录，`src-tauri/Cargo.lock` 不存在且被忽略），前端为 `package-lock.json`。
 - **发版自动化**：[release-plz](https://release-plz.dev) 监听 `main`：按 Conventional Commits 生成 `CHANGELOG.md` 和版本更新 PR；该 PR 合入后创建 `vX.Y.Z` 标签和草稿 Release，GitHub Actions 在 Windows runner 上构建 NSIS/MSI 安装包、生成签名与 `latest.json`、校验后转为正式发布。
 - **一次性配置**：在仓库 Settings → Secrets 添加
   - `RELEASE_PLZ_TOKEN`（具备 `contents: write` 的 PAT），否则 release-plz 创建的标签无法触发后续工作流；

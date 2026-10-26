@@ -2,6 +2,10 @@
 target/
 src-tauri/target/
 src-tauri/gen/schemas/
+# Cargo reads the workspace lock at the repo root (Cargo.toml is the workspace
+# root since the release-plz migration). A second lock under src-tauri would be
+# stale and ignored; refuse it outright.
+/src-tauri/Cargo.lock
 node_modules/
 dist/
 .nexa/

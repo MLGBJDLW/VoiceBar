@@ -19,6 +19,12 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 需要完整安装包时使用 `scripts/build.ps1`（NPX/Tauri 构建 NSIS + MSI，测试通过后才打包，并按上限清理缓存；`-Mode portable` 只产出根目录的 `VoiceBar.exe`）。不要提交 `target`、`dist`、`.nexa` 或根目录的 `VoiceBar.exe` / `WebView2Loader.dll`。
 
+### Cargo.lock 只有一份
+
+`Cargo.toml` 是 workspace 根（`members = ["src-tauri"]`），所以 **Cargo 只读写仓库根目录的 `Cargo.lock`**，`cargo metadata` 的 `workspace_root` 就是仓库根。`src-tauri/Cargo.lock` 是 workspace 迁移前的遗留文件，已被删除并在 `.gitignore` 中禁止重新出现（`/src-tauri/Cargo.lock`）——它当时已经缺少 `tauri-plugin-updater`，留着只会误导版本排查。
+
+升级依赖时改 `src-tauri/Cargo.toml` 后在**仓库根**执行 `cargo update -p <crate>`（或用 `--manifest-path src-tauri/Cargo.toml`，锁文件同样落在根目录），提交根的 `Cargo.lock`。
+
 ## 提交规范
 
 使用 Conventional Commits，版本与 CHANGELOG 由 release-plz 据此生成：
@@ -42,7 +48,7 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 ## 发布流程（维护者）
 
-1. PR 合入 `main` 后，release-plz 自动更新 `CHANGELOG.md`、各 `Cargo.toml` / `Cargo.lock`、`package.json` 与 `tauri.conf.json` 的版本，并开一个 `chore: release vX.Y.Z` PR。
+1. PR 合入 `main` 后，release-plz 自动更新 `CHANGELOG.md`、`src-tauri/Cargo.toml`、**根目录 `Cargo.lock`**（workspace 锁文件）、`package.json` 与 `tauri.conf.json` 的版本，并开一个 `chore: release vX.Y.Z` PR。
 2. 合入该 PR 后，release-plz 创建 `vX.Y.Z` 标签与 GitHub Release 草稿，构建工作流被触发。
 3. 工作流在 Windows runner 上构建 NSIS/MSI 安装包并上传；已配置签名密钥时还会用 `scripts/make-latest-json.mjs` 生成 `latest.json` 一并上传。
 4. 发布前的校验任务会核对 `x64-setup.exe`、`x64_en-US.msi` 是否齐全；有签名密钥时再运行 `scripts/verify-release.mjs`，确认 `latest.json` 的版本、下载地址与安装包 SHA-256 完全一致，任何一项不符都拒绝发布。

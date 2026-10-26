@@ -74,6 +74,18 @@ jobs:
           assert "v{{ version }}" in cfg["git_release_name"], cfg["git_release_name"]
           assert cargo["name"] == "voicebar", "binary name must stay voicebar"
           print(f"release-plz ok: {cargo['name']} {cargo['version']} -> {cfg['git_release_name']}")
+      - name: 校验只有一个 Cargo.lock
+        # Cargo.toml at the repo root is the workspace root, so Cargo only reads
+        # ./Cargo.lock. A second lock under src-tauri/ is stale by construction:
+        # it already drifted once and lacked tauri-plugin-updater.
+        run: |
+          set -eu
+          tracked=$(git ls-files -- 'Cargo.lock' '*/Cargo.lock')
+          test "$tracked" = "Cargo.lock" || { echo "::error::expect exactly one tracked Cargo.lock at the repo root, found: ${tracked:-none}"; exit 1; }
+          test ! -e src-tauri/Cargo.lock || { echo "::error::src-tauri/Cargo.lock exists; Cargo ignores it (workspace root is the repo root) — delete it"; exit 1; }
+          test -s Cargo.lock || { echo "::error::root Cargo.lock is empty"; exit 1; }
+          grep -q '^name = "tauri-plugin-updater"' Cargo.lock || { echo "::error::root Cargo.lock is missing tauri-plugin-updater; run cargo check"; exit 1; }
+          echo "single root Cargo.lock OK ($(git ls-files -- Cargo.lock | wc -l) tracked)"
 
   rust:
     name: Rust 测试与 release 构建（windows）
