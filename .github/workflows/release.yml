@@ -171,12 +171,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # Download by release id: a leftover draft for the same tag makes
-          # `gh release download <tag>` pick nothing ("no assets to download").
+          # `gh release download` only accepts a tag, and a leftover draft with
+          # the same tag made the tag lookup resolve to the wrong (empty)
+          # release. Resolve the asset url from the release id instead and fetch
+          # the bytes directly, which cannot be ambiguous.
           mkdir -p dist-assets
-          gh release download "${{ needs.create-release.outputs.release-id }}" \
-            --repo "${{ github.repository }}" \
-            --pattern "*x64-setup.exe" --dir dist-assets
+          # Keep the original asset name: make-latest-json.mjs rejects a bundle
+          # whose file name does not match <Product>_<version>_x64-setup.exe.
+          asset=$(gh api "repos/${{ github.repository }}/releases/${{ needs.create-release.outputs.release-id }}" \
+                  --jq '.assets[] | select(.name | endswith("x64-setup.exe")) | .name + " " + .url' | head -n1)
+          [ -n "$asset" ] || { echo "::error::草稿 Release 里没有 x64-setup.exe"; exit 1; }
+          name=${asset% *}; url=${asset#* }
+          gh api -H 'Accept: application/octet-stream' "$url" > "dist-assets/$name"
           ls -l dist-assets
       - name: 生成 latest.json（签名 + 哈希 + 下载地址）
         shell: bash
