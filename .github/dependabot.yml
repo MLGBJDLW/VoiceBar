@@ -1,0 +1,31 @@
+# 可选：Dependabot 更新前端依赖、Rust 依赖与 GitHub Actions。
+# 若觉得 PR 太多，删除本文件即可；CI 与发布流程不依赖它。
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /src-tauri
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore"
+    groups:
+      tauri:
+        patterns: ["tauri*", "wry", "muda", "windows"]
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore"
+    groups:
+      frontend:
+        patterns: ["*"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "ci"

@@ -1,0 +1,18 @@
+# Keep the top entry hand-written; release-plz prepends its generated sections.
+commit_parsers = [
+  { message = "^feat", group = "<!-- 1 -->新增" },
+  { message = "^fix", group = "<!-- 2 -->修复" },
+  { message = "^perf", group = "<!-- 3 -->性能" },
+  { message = "^refactor", group = "<!-- 4 -->重构" },
+  { message = "^docs", group = "<!-- 5 -->文档" },
+  { message = "^ci", group = "<!-- 6 -->持续集成" },
+  { message = "^test", group = "<!-- 7 -->测试" },
+  { message = "^chore\\(release\\): prepare for", skip = true },
+  { message = "^chore", group = "<!-- 8 -->杂项" },
+]
+
+protect_breaking_commits = false
+filter_commits = true
+tag_pattern = "v[0-9]*"
+topo_order = false
+sort_commits = "oldest"

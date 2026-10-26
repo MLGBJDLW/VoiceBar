@@ -1,0 +1,4 @@
+# Root-only tooling notes. This file exists so that the workspace marker
+# (Cargo.toml) at the root does not hide tracked root-level files from Cargo.
+# Nothing is built from here; the application lives in src-tauri/.
+roots = []

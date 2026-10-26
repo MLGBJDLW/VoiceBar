@@ -1,0 +1,35 @@
+---
+name: 问题反馈
+about: 报告崩溃、识别失败、快捷键无效或其他错误
+title: "[Bug] "
+labels: [bug]
+assignees: []
+---
+
+## 现象
+
+<!-- 发生了什么，期望发生什么。 -->
+
+## 复现步骤
+
+1.
+2.
+3.
+
+## 环境
+
+- VoiceBar 版本（设置页左下角或 Release 标签）：
+- Windows 版本与架构：
+- 识别服务（FunASR / whisper.cpp / 阿里云 / 讯飞 / OpenAI / Deepgram / 其他）：
+- 安装方式（exe 安装包 / MSI / 便携 exe / 自己构建）：
+
+## 启动日志
+
+<!-- %LOCALAPPDATA%\VoiceBar\logs\startup.log 中相关行；请先删除任何密钥。 -->
+
+```
+```
+
+## 其他
+
+<!-- 截图、录屏、已尝试的排查步骤。 -->

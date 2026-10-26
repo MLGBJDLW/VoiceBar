@@ -1,0 +1,23 @@
+{
+  "name": "voicebar",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --port 1420 --strictPort",
+    "build": "tsc --noEmit && vite build",
+    "tauri": "tauri",
+    "test:effects": "node --test tests/effects.test.mjs",
+    "test:shortcut": "node --test tests/shortcut.test.mjs",
+    "test:frontend": "npm run test:effects && npm run test:shortcut",
+    "test": "npm run test:frontend && cargo test --manifest-path src-tauri/Cargo.toml"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.8.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.8.0",
+    "typescript": "~5.9.3",
+    "vite": "^7.1.9"
+  }
+}

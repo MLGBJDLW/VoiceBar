@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 使用与配置问题
+    url: https://github.com/MLGBJDLW/VoiceBar/discussions
+    about: 识别服务、快捷键、安装问题请先在 Discussions 搜索或提问。
+  - name: 安全漏洞
+    url: https://github.com/MLGBJDLW/VoiceBar/security/advisories/new
+    about: 请勿公开报告安全问题，使用私密安全公告。

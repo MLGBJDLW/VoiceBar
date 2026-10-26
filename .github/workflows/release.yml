@@ -1,0 +1,173 @@
+name: Release
+
+# Called by GitHub when release-plz publishes a tag, by the draft-Release
+# 'published' event, or manually. Bundle files use the standard Tauri names:
+#   VoiceBar_<version>_x64-setup.exe, VoiceBar_<version>_x64_en-US.msi, .sig
+
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+  release:
+    types: [edited]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 要构建的标签（例如 v0.1.0）
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+jobs:
+  create-release:
+    name: 准备草稿 Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.decide.outputs.tag }}
+      release-id: ${{ steps.decide.outputs.release-id }}
+      should-build: ${{ steps.decide.outputs.should-build }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: 解析标签、复用或创建草稿 Release
+        id: decide
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          EVENT_RELEASE_TAG: ${{ github.event.release.tag_name }}
+          EVENT_RELEASE_DRAFT: ${{ github.event.release.draft }}
+          EVENT_RELEASE_ID: ${{ github.event.release.id }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          event="${{ github.event_name }}"
+          if [ "$event" = "release" ]; then
+            tag="$EVENT_RELEASE_TAG"
+          elif [ "$event" = "workflow_dispatch" ]; then
+            tag="$INPUT_TAG"
+          else
+            tag="${{ github.ref_name }}"
+          fi
+          if ! git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            echo "::error::标签 $tag 不存在于仓库中。"
+            exit 1
+          fi
+          if [ "$event" = "release" ]; then
+            if [ "$EVENT_RELEASE_DRAFT" != "true" ]; then
+              echo "Release $tag 已正式发布，跳过（避免覆盖已发布资产）。"
+              echo "should-build=false" >> "$GITHUB_OUTPUT"
+              echo "tag=$tag" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            id="$EVENT_RELEASE_ID"
+          else
+            json=$(gh api "repos/$REPO/releases/tags/$tag" 2>/dev/null || true)
+            if [ -n "$json" ]; then
+              id=$(echo "$json" | jq -r '.id')
+              draft=$(echo "$json" | jq -r '.draft')
+              if [ "$draft" != "true" ]; then
+                echo "::error::Release $tag 已正式发布，拒绝重新构建覆盖资产。请先手动将其转为草稿。"
+                exit 1
+              fi
+            else
+              id=$(gh api -X POST "repos/$REPO/releases" \
+                -f tag_name="$tag" -f name="VoiceBar $tag" -F draft=true -F prerelease=false | jq -r '.id')
+            fi
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "release-id=$id" >> "$GITHUB_OUTPUT"
+          echo "should-build=true" >> "$GITHUB_OUTPUT"
+          echo "will build $tag into draft release $id"
+
+  build:
+    name: 构建安装包（${{ matrix.platform.name }}）
+    needs: create-release
+    if: needs.create-release.outputs.should-build == 'true'
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - name: windows-x86_64
+            runner: windows-latest
+            args: '--no-bundle --bundles nsis,msi'
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 60
+    env:
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.create-release.outputs.tag }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          key: release-${{ matrix.platform.name }}
+      - name: 安装前端依赖
+        run: npm ci --no-audit --no-fund
+      - name: 测试（同一提交必须先通过）
+        run: npm test
+      - name: 构建并上传到草稿 Release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          # 可选：配置签名后自动生成 .sig 并随安装包上传。
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ needs.create-release.outputs.tag }}
+          releaseName: 'VoiceBar ${{ needs.create-release.outputs.tag }}'
+          releaseId: ${{ needs.create-release.outputs.release-id }}
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.platform.args }}
+
+  publish:
+    name: 草稿转为正式 Release
+    needs: [create-release, build]
+    if: needs.create-release.outputs.should-build == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: 校验资产齐全后发布
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release-id }}
+          TAG: ${{ needs.create-release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          assets=$(gh api "repos/$REPO/releases/$RELEASE_ID" --jq '.assets[].name')
+          echo "$assets"
+          missing=0
+          for suffix in x64-setup.exe x64_en-US.msi; do
+            if ! grep -q "$suffix" <<<"$assets"; then
+              echo "::error::缺少资产：*$suffix"
+              missing=1
+            fi
+          done
+          [ "$missing" = 0 ] || exit 1
+          gh api -X PATCH "repos/$REPO/releases/$RELEASE_ID" -F draft=false >/dev/null
+          echo "已发布：https://github.com/$REPO/releases/tag/$TAG"

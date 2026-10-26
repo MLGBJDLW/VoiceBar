@@ -1,0 +1,4 @@
+# Tauri CLI expects to run from src-tauri/. This footer tells Cargo not to walk
+# up into the workspace root (which is marked only for release-plz).
+members = ["."]
+exclude = []

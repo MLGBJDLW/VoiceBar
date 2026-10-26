@@ -1,0 +1,22 @@
+[workspace]
+members = ["src-tauri"]
+# Build caches and the published exe live in the repository root, outside the
+# workspace, so this file never hides root-level configuration files from Cargo.
+exclude = ["tests"]
+resolver = "2"
+
+[workspace.metadata.release]
+# release-plz reads release configuration from release-plz.toml.
+
+# Profile lives here (previously in src-tauri/Cargo.toml): Cargo ignores
+# profiles declared by non-root workspace members.
+[profile.release]
+opt-level = "s"
+lto = "thin"
+codegen-units = 8
+strip = true
+panic = "abort"
+
+[profile.dev]
+debug = 0
+incremental = false

@@ -1,0 +1,17 @@
+{
+  "$schema": "https://raw.githubusercontent.com/release-plz/release-plz/main/release-plz/schema.json",
+  "allow_dirty": false,
+  "changelog_config": ".release-plz/changelog.toml",
+  "publish": false,
+  "release_always": true,
+  "semver_check": false,
+  "pr_labels": ["release"],
+  "git_release_enable": true,
+  "git_release_draft": true,
+  "git_release_name": "VoiceBar v{{ version }}",
+  "git_tag_enable": true,
+  "git_tag_name": "v{{ version }}",
+  "package": {
+    "version_group": "voicebar"
+  }
+}

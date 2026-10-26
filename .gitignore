@@ -1,0 +1,20 @@
+# Tauri / Rust (build output lives at the workspace root, target/ and dist/)
+target/
+src-tauri/target/
+src-tauri/gen/schemas/
+node_modules/
+dist/
+.nexa/
+.env
+*.key
+*.pfx
+
+# Delivery files in the project root are build outputs, not sources.
+/VoiceBar.exe
+/WebView2Loader.dll
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

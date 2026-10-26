@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-label="VoiceBar">
+  <rect width="64" height="64" rx="15" fill="#111715"/>
+  <rect x="0.5" y="0.5" width="63" height="63" rx="14.5" fill="none" stroke="#a7e8cf" stroke-opacity="0.22"/>
+  <g fill="#a7e8cf" stroke="#a7e8cf" stroke-linecap="round" stroke-width="4.2">
+    <line x1="13.5" y1="27.5" x2="13.5" y2="36.5"/>
+    <line x1="21.75" y1="19" x2="21.75" y2="45"/>
+    <line x1="30" y1="10.5" x2="30" y2="53.5"/>
+    <line x1="38.25" y1="19" x2="38.25" y2="45"/>
+    <line x1="46.5" y1="27.5" x2="46.5" y2="36.5"/>
+  </g>
+</svg>

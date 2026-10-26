@@ -1,0 +1,55 @@
+{
+  "productName": "VoiceBar",
+  "version": "0.1.0",
+  "identifier": "studio.voicebar.desktop",
+  "build": {
+    "features": [
+      "custom-protocol"
+    ],
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "nsis",
+      "msi"
+    ],
+    "createUpdaterArtifacts": false,
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ],
+    "copyright": "© 2026 MLGBJDLW. MIT License.",
+    "category": "Utility",
+    "longDescription": "VoiceBar 是 Windows 桌面语音输入条：任意位置按快捷键说话，文字直接落在光标处。支持 FunASR、whisper.cpp、阿里云、OpenAI Realtime、Deepgram、科大讯飞及 OpenAI 兼容转写，可选用语言模型二次校对。",
+    "licenseFile": "../LICENSE",
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": [
+          "SimpChinese",
+          "English"
+        ]
+      },
+      "wix": {
+        "language": [
+          "zh-CN",
+          "en-US"
+        ]
+      }
+    }
+  },
+  "plugins": {}
+}

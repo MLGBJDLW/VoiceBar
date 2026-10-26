@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['docs/**', '**/*.md']
+  pull_request:
+    paths-ignore: ['docs/**', '**/*.md']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+jobs:
+  quality:
+    name: 前端与公共配置检查（ubuntu）
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: 安装前端依赖
+        run: npm ci --no-audit --no-fund
+      - name: 类型检查与前端构建
+        run: npm run build
+      - name: 前端测试（声浪渲染 + 快捷键录制）
+        run: npm run test:frontend
+      - name: 校验 JSON 配置
+        run: |
+          node -e '
+            const fs = require("node:fs");
+            const read = (p) => JSON.parse(fs.readFileSync(p, "utf8"));
+            const pkg = read("package.json");
+            const conf = read("src-tauri/tauri.conf.json");
+            const lock = read("package-lock.json");
+            const errors = [];
+            if (pkg.version !== conf.version) errors.push(`package.json ${pkg.version} != tauri.conf.json ${conf.version}`);
+            if (lock.version !== pkg.version || lock.packages[""].version !== pkg.version) errors.push(`package-lock.json ${lock.version} is stale (expected ${pkg.version})`);
+            if (pkg.name !== "voicebar") errors.push("package.json name must stay voicebar (release-plz renames the binary)");
+            if (conf.identifier !== "studio.voicebar.desktop") errors.push("tauri identifier changed unexpectedly");
+            if (errors.length) { console.error(errors.join("\n")); process.exit(1); }
+            console.log(`versions consistent: ${pkg.version}`);
+          '
+      - name: 校验 release-plz 配置
+        shell: python
+        run: |
+          import tomllib
+          with open("release-plz.toml", "rb") as f:
+              cfg = tomllib.load(f)
+          with open("src-tauri/Cargo.toml", "rb") as f:
+              cargo = tomllib.load(f)["package"]
+          with open(".release-plz/changelog.toml", "rb") as f:
+              tomllib.load(f)
+          assert cfg["publish"] is False, "publishing to crates.io must stay disabled"
+          assert cfg["git_tag_name"] == "v{{ version }}", cfg["git_tag_name"]
+          assert "v{{ version }}" in cfg["git_release_name"], cfg["git_release_name"]
+          assert cargo["name"] == "voicebar", "binary name must stay voicebar"
+          print(f"release-plz ok: {cargo['name']} {cargo['version']} -> {cfg['git_release_name']}")
+
+  rust:
+    name: Rust 测试与 release 构建（windows）
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+      - name: 安装前端依赖
+        run: npm ci --no-audit --no-fund
+      - name: 前端构建（embedded assets 是 release 构建的前置）
+        run: npm run build
+      - name: Rust 格式检查
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+      - name: Rust 测试
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+      - name: 生产构建（custom-protocol）
+        run: cargo build --release --features custom-protocol --manifest-path src-tauri/Cargo.toml
+      - name: 记录产物体积
+        shell: pwsh
+        run: |
+          Get-Item 'src-tauri/target/release/voicebar.exe', 'src-tauri/target/release/WebView2Loader.dll' |
+            Select-Object Name, Length | Format-Table | Out-String | Write-Host
