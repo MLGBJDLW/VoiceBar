@@ -241,22 +241,23 @@ jobs:
           set -euo pipefail
           assets=$(gh api "repos/$REPO/releases/$RELEASE_ID" --jq '.assets[].name')
           echo "$assets"
+          # Match with case, not `grep <<<`: on the Windows Git Bash runner the
+          # here-string plus `set -e` made a present asset read as missing.
           missing=0
           for suffix in x64-setup.exe x64_en-US.msi; do
-            if ! grep -q "$suffix" <<<"$assets"; then
-              echo "::error::缺少资产：*$suffix"
-              missing=1
-            fi
+            case $assets in
+              *"$suffix"*) ;;
+              *) echo "::error::缺少资产：*$suffix"; missing=1 ;;
+            esac
           done
           [ "$missing" = 0 ] || exit 1
           # If a signing key is configured, the updater manifest is mandatory and
           # must agree with the published installer, otherwise clients would
           # either never update or fail signature verification after download.
           if [ -n "${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}" ]; then
-            if ! grep -q '^latest.json$' <<<"$assets"; then
+            case $assets in *latest.json*) ;; *) 
               echo "::error::缺少 latest.json（已配置签名密钥，应用内更新依赖该文件）"
-              exit 1
-            fi
+              exit 1 ;; esac
             # Same reason as the build job: `gh release download` needs a tag, and
             # a duplicate draft made the tag lookup resolve to nothing.
             mkdir -p verify
