@@ -19,7 +19,7 @@ const ENDPOINT: &str = "https://github.com/MLGBJDLW/VoiceBar/releases/latest/dow
 /// Public half of the release signing key (`tauri signer generate`). Rotating
 /// it means every future release must be signed with the new private key; apps
 /// already installed keep verifying with the key they shipped with.
-const PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDcwMUJBN0Y1MkU2MTgzQ0EKUldUS2cyRXU5YWNiY0hySklGZER3RENwMWZzVG0rem5WYnl5S0Z3SjNaOWt6SmlJRnZUNXViaEQK";
+const PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDYzMDc0M0UxMUMyQUQ1NUYKUldSZjFTb2M0VU1IWS93cVVibHlQOWtHdEJUN1hsTXpIc1dOTXA4RGFXN3htMVlCUWk3L2N3SmIK";
 
 /// How long a manifest check may hang before we tell the user to retry.
 const CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);

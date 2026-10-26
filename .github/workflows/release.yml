@@ -104,7 +104,10 @@ jobs:
         platform:
           - name: windows-x86_64
             runner: windows-latest
-            args: '--no-bundle --bundles nsis,msi'
+            # No `--no-bundle` here: that flag skips bundling entirely (it wins
+            # over --bundles), so tauri-action would upload nothing and the
+            # publish job would fail on the missing assets.
+            args: '--bundles nsis,msi'
     runs-on: ${{ matrix.platform.runner }}
     timeout-minutes: 60
     env:
