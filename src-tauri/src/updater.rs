@@ -63,8 +63,12 @@ pub fn bundled() -> bool {
     if cfg!(debug_assertions) || !cfg!(windows) {
         return false;
     }
-    let Ok(exe) = std::env::current_exe() else { return false };
-    let Some(dir) = exe.parent() else { return false };
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    let Some(dir) = exe.parent() else {
+        return false;
+    };
     let root = std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from);
     root.is_some_and(|root| dir.starts_with(root.join("VoiceBar")))
 }
@@ -77,7 +81,10 @@ fn parse_endpoint(text: &str) -> Result<url::Url, String> {
     url::Url::parse(text).map_err(|e| format!("更新地址无效：{e}"))
 }
 
-fn build_updater(app: &tauri::AppHandle, timeout: std::time::Duration) -> Result<tauri_plugin_updater::Updater, String> {
+fn build_updater(
+    app: &tauri::AppHandle,
+    timeout: std::time::Duration,
+) -> Result<tauri_plugin_updater::Updater, String> {
     app.updater_builder()
         .pubkey(PUBKEY)
         .endpoints(vec![parse_endpoint(&endpoint())?])
@@ -111,7 +118,10 @@ pub async fn check_quietly(app: &tauri::AppHandle) -> Result<Option<UpdateInfo>,
         return Ok(None);
     }
     let current = app.package_info().version.to_string();
-    let release = build_updater(app, CHECK_TIMEOUT)?.check().await.map_err(describe)?;
+    let release = build_updater(app, CHECK_TIMEOUT)?
+        .check()
+        .await
+        .map_err(describe)?;
     Ok(release.map(|release| UpdateInfo {
         current_version: current,
         available: true,
@@ -124,7 +134,13 @@ pub async fn check_quietly(app: &tauri::AppHandle) -> Result<Option<UpdateInfo>,
 #[tauri::command]
 pub async fn check_for_update(app: tauri::AppHandle) -> Result<UpdateInfo, String> {
     let current = app.package_info().version.to_string();
-    let none = || UpdateInfo { current_version: current.clone(), available: false, version: None, notes: None, date: None };
+    let none = || UpdateInfo {
+        current_version: current.clone(),
+        available: false,
+        version: None,
+        notes: None,
+        date: None,
+    };
     if !can_self_update() {
         return Ok(none());
     }
@@ -148,7 +164,10 @@ pub async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
     // tampered or unsigned artifact never reaches the installer. Abort any live
     // dictation first: the app restarts and nothing should be injected.
     crate::signal_stop_current(&app, true);
-    release.download_and_install(|_chunk, _total| {}, || {}).await.map_err(describe)?;
+    release
+        .download_and_install(|_chunk, _total| {}, || {})
+        .await
+        .map_err(describe)?;
     app.restart();
 }
 
@@ -158,14 +177,23 @@ fn describe(error: tauri_plugin_updater::Error) -> String {
     use tauri_plugin_updater::Error as E;
     match error {
         E::EmptyEndpoints => "更新地址未配置".into(),
-        E::Reqwest(e) if e.is_timeout() => "检查更新超时，请稍后重试；企业网络可能拦截了 GitHub".into(),
+        E::Reqwest(e) if e.is_timeout() => {
+            "检查更新超时，请稍后重试；企业网络可能拦截了 GitHub".into()
+        }
         E::Reqwest(e) if e.is_connect() => "无法连接更新服务，请检查网络或代理".into(),
         E::Reqwest(_) => "更新请求失败，请稍后重试".into(),
         E::Network(message) => format!("更新网络错误：{}", trim(message)),
-        E::ReleaseNotFound | E::Serialization(_) => "还没有可用的更新包（latest.json 缺失或格式不正确）".into(),
+        E::ReleaseNotFound | E::Serialization(_) => {
+            "还没有可用的更新包（latest.json 缺失或格式不正确）".into()
+        }
         E::InsecureTransportProtocol => "更新地址必须使用 HTTPS".into(),
-        E::TargetNotFound(target) => format!("更新包缺少目标 {target}，请检查发布流程生成的 latest.json"),
-        E::TargetsNotFound(targets) => format!("更新包缺少目标 {}，请检查发布流程生成的 latest.json", targets.join(" / ")),
+        E::TargetNotFound(target) => {
+            format!("更新包缺少目标 {target}，请检查发布流程生成的 latest.json")
+        }
+        E::TargetsNotFound(targets) => format!(
+            "更新包缺少目标 {}，请检查发布流程生成的 latest.json",
+            targets.join(" / ")
+        ),
         E::Minisign(_) => "更新包签名校验失败，已取消安装".into(),
         E::Io(_) | E::TempDirNotOnSameMountPoint | E::TempDirNotFound => {
             "无法写入临时文件，请检查磁盘空间和权限".into()
@@ -176,7 +204,69 @@ fn describe(error: tauri_plugin_updater::Error) -> String {
 
 fn trim(text: String) -> String {
     let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if compact.chars().count() > 240 { compact.chars().take(240).collect::<String>() + "…" } else { compact }
+    if compact.chars().count() > 240 {
+        compact.chars().take(240).collect::<String>() + "…"
+    } else {
+        compact
+    }
+}
+
+#[cfg(test)]
+mod release_metadata_tests {
+    // The repository config is checked from here because these are the checks
+    // that historically broke CI: `release-plz.toml` once held a JSON object,
+    // so every TOML parser rejected it, and the Rust sources had never been
+    // through `cargo fmt`. Keep both guarded.
+    use std::path::PathBuf;
+
+    fn repo_file(relative: &str) -> String {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("src-tauri sits inside the repository")
+            .to_path_buf();
+        let path = root.join(relative);
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+    }
+
+    #[test]
+    fn release_plz_config_is_toml_not_json() {
+        let text = repo_file("release-plz.toml");
+        assert!(
+            !text.trim_start().starts_with('{'),
+            "release-plz.toml must be TOML; a JSON body fails every TOML parser"
+        );
+        assert!(text.contains("publish = false"), "crates.io stays off");
+        assert!(text.contains("git_tag_name = \"v{{ version }}\""));
+        assert!(text.contains("[package]"));
+        assert!(repo_file(".release-plz/changelog.toml").contains("commit_parsers"));
+    }
+
+    #[test]
+    fn release_version_matches_every_manifest() {
+        let cargo = repo_file("src-tauri/Cargo.toml");
+        let version = cargo
+            .split("[package]")
+            .nth(1)
+            .expect("[package] table")
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("version"))
+            .map(|rest| {
+                rest.trim_start()
+                    .trim_start_matches('=')
+                    .trim()
+                    .trim_matches('"')
+                    .to_string()
+            })
+            .expect("package.version");
+        let tauri: serde_json::Value =
+            serde_json::from_str(&repo_file("src-tauri/tauri.conf.json")).expect("tauri.conf.json");
+        assert_eq!(tauri["version"].as_str(), Some(version.as_str()));
+        let package = repo_file("package.json");
+        assert!(
+            package.contains(&format!("\"version\": \"{version}\"")),
+            "package.json must carry version {version}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -187,7 +277,9 @@ mod tests {
     fn feed_is_https_and_points_at_the_latest_asset() {
         let parsed = parse_endpoint(&endpoint()).unwrap();
         assert_eq!(parsed.scheme(), "https");
-        assert!(parsed.path().ends_with("/releases/latest/download/latest.json"));
+        assert!(parsed
+            .path()
+            .ends_with("/releases/latest/download/latest.json"));
         assert!(parse_endpoint("file:///C:/latest.json").is_err());
         assert!(parse_endpoint("not a url").is_err());
     }
@@ -216,12 +308,19 @@ mod tests {
 
     /// Minimal base64 decoder so the test needs no extra dependency.
     fn base64_decode(input: &str) -> String {
-        const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        const TABLE: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
         let mut out = Vec::new();
         let mut buffer: u32 = 0;
         let mut bits = 0;
-        for byte in input.bytes().filter(|b| !b.is_ascii_whitespace() && *b != b'=') {
-            let value = TABLE.iter().position(|c| *c == byte).expect("base64 alphabet") as u32;
+        for byte in input
+            .bytes()
+            .filter(|b| !b.is_ascii_whitespace() && *b != b'=')
+        {
+            let value = TABLE
+                .iter()
+                .position(|c| *c == byte)
+                .expect("base64 alphabet") as u32;
             buffer = (buffer << 6) | value;
             bits += 6;
             if bits >= 8 {
