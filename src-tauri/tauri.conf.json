@@ -51,5 +51,12 @@
       }
     }
   },
-  "plugins": {}
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/MLGBJDLW/VoiceBar/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDYzMDc0M0UxMUMyQUQ1NUYKUldSZjFTb2M0VU1IWS93cVVibHlQOWtHdEJUN1hsTXpIc1dOTXA4RGFXN3htMVlCUWk3L2N3SmIK"
+    }
+  }
 }

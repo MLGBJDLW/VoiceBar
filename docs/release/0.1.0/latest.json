@@ -1,0 +1,15 @@
+{
+  "version": "0.1.0",
+  "notes": "",
+  "pub_date": "2026-10-26T09:45:45Z",
+  "platforms": {
+    "windows-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSZjFTb2M0VU1IWTRERFJYTFFzanB2ZzJYUkNEMjUycGFFakM5UWFKczY5R3lhK1R3a3Bud3RpUkRhaGViVTFiN1M2Z3hsOXljbHd3OThIazNYQUFxWW5JVTNiTEhYeHcwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMDA3OTQ1CWZpbGU6Vm9pY2VCYXJfMC4xLjBfeDY0LXNldHVwLmV4ZQl2ZXJzaW9uOjAuMS4wCitnNXNZM1NScENnN0hHUXlGK0ZpL2l4YVp0Wi92R2JjcElleUZOYk9jZGVqOTBmSHVmUFU2cVFaWW1xSGxVOVlxeFFLRGNmMmduVEUzbGxoTVB0Y0RRPT0K",
+      "url": "https://github.com/MLGBJDLW/VoiceBar/releases/download/v0.1.0/VoiceBar_0.1.0_x64-setup.exe",
+      "sha256": "507d9726099b26a76b3d07ecd158a25a6d29ee8d9bd826a383149ff78e35485e"
+    }
+  },
+  "windows-x86_64-nsis": {
+    "installer": "VoiceBar_0.1.0_x64-setup.exe"
+  }
+}
