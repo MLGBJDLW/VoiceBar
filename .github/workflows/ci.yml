@@ -63,6 +63,8 @@ jobs:
         # TOML that parses is not enough: release-plz rejects unknown keys with a
         # bare "invalid config file" after the run has already started. Check the
         # shape against the vendored schema so a bad key fails here instead.
+        # Only these three tables are legal at the top level; `$schema` and any
+        # other metadata key is rejected, so none of them is allowed below.
         shell: python
         run: |
           import json, tomllib
@@ -76,7 +78,7 @@ jobs:
               tomllib.load(f)
 
           defs = schema["$defs"]
-          allowed = {"$schema", "workspace", "package", "changelog"}
+          allowed = {"workspace", "package", "changelog"}
           unknown = set(cfg) - allowed
           assert not unknown, f"release-plz.toml: unknown top-level keys {sorted(unknown)}"
 

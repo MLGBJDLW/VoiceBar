@@ -239,10 +239,11 @@ mod release_metadata_tests {
 
     #[test]
     fn release_plz_config_matches_its_schema() {
-        // Two separate CI failures lived here: the file once held a JSON
-        // object (no TOML parser could read it), and then put global keys at
-        // the top level, where release-plz only accepts `workspace`,
-        // `package` and `changelog` and aborts the release job.
+        // Three separate release-job failures lived here: the file once held a
+        // JSON object (no TOML parser could read it), then put global keys at
+        // the top level, then carried a `"$schema"` key. release-plz accepts
+        // only `workspace`, `package` and `changelog` at the top level and
+        // aborts the run on anything else, metadata keys included.
         let text = repo_file("release-plz.toml");
         assert!(
             !text.trim_start().starts_with('{'),
@@ -276,9 +277,6 @@ mod release_metadata_tests {
             };
             let key = key.trim().trim_matches('"');
             match section {
-                // `$schema` is the JSON-schema editors use; release-plz itself
-                // ignores unknown `$`-prefixed metadata, keep it out of scope.
-                "" if key == "$schema" => {}
                 "" => panic!("top-level key {key:?} must live under [workspace]"),
                 "workspace" => assert!(
                     workspace_keys.iter().any(|k| k == key),

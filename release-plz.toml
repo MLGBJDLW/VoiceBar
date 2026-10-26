@@ -5,7 +5,6 @@
 # Everything global goes under `workspace`; per-package overrides are a
 # `[[package]]` array. `version_group` is a package-level key: it is what keeps
 # the Cargo, package.json and tauri.conf.json versions moving together.
-"$schema" = "./docs/release-plz.schema.json"
 
 [workspace]
 allow_dirty = false
