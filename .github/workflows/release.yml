@@ -1,4 +1,4 @@
-﻿name: Release
+name: Release
 
 # Called by GitHub when release-plz publishes a tag, by the draft-Release
 # 'published' event, or manually. Bundle files use the standard Tauri names:
@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 瑕佹瀯寤虹殑鏍囩锛堜緥濡?v0.1.0锛?
+        description: 要构建的标签（例如 v0.1.0）
         required: true
         type: string
 
@@ -28,7 +28,7 @@ env:
 
 jobs:
   create-release:
-    name: 鍑嗗鑽夌 Release
+    name: 准备草稿 Release
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -41,7 +41,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - name: 瑙ｆ瀽鏍囩銆佸鐢ㄦ垨鍒涘缓鑽夌 Release
+      - name: 解析标签、复用或创建草稿 Release
         id: decide
         shell: bash
         env:
@@ -50,7 +50,7 @@ jobs:
           EVENT_RELEASE_DRAFT: ${{ github.event.release.draft }}
           EVENT_RELEASE_ID: ${{ github.event.release.id }}
           REPO: ${{ github.repository }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           event="${{ github.event_name }}"
@@ -62,12 +62,12 @@ jobs:
             tag="${{ github.ref_name }}"
           fi
           if ! git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
-            echo "::error::鏍囩 $tag 涓嶅瓨鍦ㄤ簬浠撳簱涓€?
+            echo "::error::标签 $tag 不存在于仓库中。"
             exit 1
           fi
           if [ "$event" = "release" ]; then
             if [ "$EVENT_RELEASE_DRAFT" != "true" ]; then
-              echo "Release $tag 宸叉寮忓彂甯冿紝璺宠繃锛堥伩鍏嶈鐩栧凡鍙戝竷璧勪骇锛夈€?
+              echo "Release $tag 已正式发布，跳过（避免覆盖已发布资产）。"
               echo "should-build=false" >> "$GITHUB_OUTPUT"
               echo "tag=$tag" >> "$GITHUB_OUTPUT"
               exit 0
@@ -82,15 +82,17 @@ jobs:
               id=$(echo "$json" | jq -r '.id')
               draft=$(echo "$json" | jq -r '.draft')
               if [ "$draft" != "true" ]; then
-                echo "::error::Release $tag 宸叉寮忓彂甯冿紝鎷掔粷閲嶆柊鏋勫缓瑕嗙洊璧勪骇銆傝鍏堟墜鍔ㄥ皢鍏惰浆涓鸿崏绋裤€?
+                echo "::error::Release $tag 已正式发布，拒绝重新构建覆盖资产。请先手动将其转为草稿。"
                 exit 1
               fi
             else
-              status=$(gh api "repos/$REPO/releases/tags/$tag" 2>&1 >/dev/null | grep -o 'HTTP 404' || true)
-              if [ -z "$status" ]; then
-                echo "::error::璇诲彇 Release $tag 澶辫触锛堟棦涓嶆槸瀛樺湪锛屼篃涓嶆槸 404锛夛紝鍏堜汉宸ョ‘璁ゃ€?
-                exit 1
-              fi
+              # A bare `... | grep -o` aborts under `set -euo pipefail` when
+              # grep finds nothing, so capture the text and match it instead.
+              err=$(gh api "repos/$REPO/releases/tags/$tag" 2>&1 >/dev/null || true)
+              case "$err" in
+                *"HTTP 404"*) ;;
+                *) echo "::error::读取 Release $tag 失败（既不存在也不是 404），先人工确认。"; exit 1 ;;
+              esac
               id=$(gh api -X POST "repos/$REPO/releases" \
                 -f tag_name="$tag" -f name="VoiceBar $tag" -F draft=true -F prerelease=false | jq -r '.id')
             fi
@@ -101,7 +103,7 @@ jobs:
           echo "will build $tag into draft release $id"
 
   build:
-    name: 鏋勫缓瀹夎鍖咃紙${{ matrix.platform.name }}锛?
+    name: 构建安装包（${{ matrix.platform.name }}）
     needs: create-release
     if: needs.create-release.outputs.should-build == 'true'
     permissions:
@@ -135,14 +137,14 @@ jobs:
         with:
           workspaces: src-tauri -> target
           key: release-${{ matrix.platform.name }}
-      - name: 瀹夎鍓嶇渚濊禆
+      - name: 安装前端依赖
         run: npm ci --no-audit --no-fund
-      - name: 娴嬭瘯锛堝悓涓€鎻愪氦蹇呴』鍏堥€氳繃锛?
+      - name: 测试（同一提交必须先通过）
         run: npm test
       # Produces the NSIS installer plus its updater signature. With
       # createUpdaterArtifacts="v1Compatible" the installer itself is signed
       # (no extra .zip), which is what latest.json points at.
-      - name: 鏋勫缓骞朵笂浼犲埌鑽夌 Release
+      - name: 构建并上传到草稿 Release
         uses: tauri-apps/tauri-action@v0
         env:
           # tauri-action uploads the bundles with this token; without it the step
@@ -163,10 +165,10 @@ jobs:
         with:
           node-version: 24
           cache: npm
-      - name: 涓嬭浇宸蹭笂浼犵殑瀹夎鍖?
+      - name: 下载已上传的安装包
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           mkdir -p dist-assets
@@ -174,7 +176,7 @@ jobs:
             --repo "${{ github.repository }}" \
             --pattern "*x64-setup.exe" --dir dist-assets
           ls -l dist-assets
-      - name: 鐢熸垚 latest.json锛堢鍚?+ 鍝堝笇 + 涓嬭浇鍦板潃锛?
+      - name: 生成 latest.json（签名 + 哈希 + 下载地址）
         shell: bash
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -187,17 +189,17 @@ jobs:
             --tag "${{ needs.create-release.outputs.tag }}" --repo "${{ github.repository }}" \
             --bundle "$bundle" --out latest.json
           cat latest.json
-      - name: 涓婁紶 latest.json 鍒拌崏绋?Release
+      - name: 上传 latest.json 到草稿 Release
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           gh release upload "${{ needs.create-release.outputs.tag }}" latest.json \
             --repo "${{ github.repository }}" --clobber
 
   publish:
-    name: 鑽夌杞负姝ｅ紡 Release
+    name: 草稿转为正式 Release
     needs: [create-release, build]
     if: needs.create-release.outputs.should-build == 'true'
     runs-on: windows-latest
@@ -208,10 +210,10 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.create-release.outputs.tag }}
-      - name: 鏍￠獙璧勪骇涓庢洿鏂版竻鍗?
+      - name: 校验资产与更新清单
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           RELEASE_ID: ${{ needs.create-release.outputs.release-id }}
           TAG: ${{ needs.create-release.outputs.tag }}
@@ -222,7 +224,7 @@ jobs:
           missing=0
           for suffix in x64-setup.exe x64_en-US.msi; do
             if ! grep -q "$suffix" <<<"$assets"; then
-              echo "::error::缂哄皯璧勪骇锛?$suffix"
+              echo "::error::缺少资产：*$suffix"
               missing=1
             fi
           done
@@ -232,7 +234,7 @@ jobs:
           # either never update or fail signature verification after download.
           if [ -n "${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}" ]; then
             if ! grep -q '^latest.json$' <<<"$assets"; then
-              echo "::error::缂哄皯 latest.json锛堝凡閰嶇疆绛惧悕瀵嗛挜锛屽簲鐢ㄥ唴鏇存柊渚濊禆璇ユ枃浠讹級"
+              echo "::error::缺少 latest.json（已配置签名密钥，应用内更新依赖该文件）"
               exit 1
             fi
             mkdir -p verify
@@ -242,4 +244,4 @@ jobs:
               --tag "$TAG" --repo "$REPO"
           fi
           gh api -X PATCH "repos/$REPO/releases/$RELEASE_ID" -F draft=false >/dev/null
-          echo "宸插彂甯冿細https://github.com/$REPO/releases/tag/$TAG"
+          echo "已发布：https://github.com/$REPO/releases/tag/$TAG"
