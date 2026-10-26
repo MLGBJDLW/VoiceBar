@@ -1,7 +1,13 @@
-# release-plz configuration. This is TOML, not JSON: release-plz and the
-# "check release-plz config" CI step both parse it with a TOML parser, so a
-# JSON body here fails the whole frontend/config job. Keep it in sync with
-# `.release-plz/changelog.toml`.
+# release-plz configuration.
+#
+# Top level keys are only `workspace`, `package` and `changelog` (see
+# docs/release-plz.schema.json, which this file is validated against in CI).
+# Everything global goes under `workspace`; per-package overrides are a
+# `[[package]]` array. `version_group` is a package-level key: it is what keeps
+# the Cargo, package.json and tauri.conf.json versions moving together.
+"$schema" = "./docs/release-plz.schema.json"
+
+[workspace]
 allow_dirty = false
 changelog_config = ".release-plz/changelog.toml"
 publish = false
@@ -14,5 +20,6 @@ git_release_name = "VoiceBar v{{ version }}"
 git_tag_enable = true
 git_tag_name = "v{{ version }}"
 
-[package]
+[[package]]
+name = "voicebar"
 version_group = "voicebar"

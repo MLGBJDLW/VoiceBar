@@ -228,16 +228,71 @@ mod release_metadata_tests {
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
     }
 
+    fn schema_properties(schema: &serde_json::Value, definition: &str) -> Vec<String> {
+        schema["$defs"][definition]["properties"]
+            .as_object()
+            .expect("schema properties")
+            .keys()
+            .cloned()
+            .collect()
+    }
+
     #[test]
-    fn release_plz_config_is_toml_not_json() {
+    fn release_plz_config_matches_its_schema() {
+        // Two separate CI failures lived here: the file once held a JSON
+        // object (no TOML parser could read it), and then put global keys at
+        // the top level, where release-plz only accepts `workspace`,
+        // `package` and `changelog` and aborts the release job.
         let text = repo_file("release-plz.toml");
         assert!(
             !text.trim_start().starts_with('{'),
-            "release-plz.toml must be TOML; a JSON body fails every TOML parser"
+            "release-plz.toml must be TOML, not a JSON object"
         );
+
+        let schema: serde_json::Value =
+            serde_json::from_str(&repo_file("docs/release-plz.schema.json")).expect("schema");
+        let workspace_keys = schema_properties(&schema, "Workspace");
+        let package_keys = schema_properties(&schema, "PackageSpecificConfigWithName");
+
+        let mut section = "";
+        let mut seen_workspace = false;
+        let mut seen_package = false;
+        for line in text.lines().map(str::trim) {
+            if line.starts_with('#') || line.is_empty() {
+                continue;
+            }
+            if line == "[workspace]" {
+                section = "workspace";
+                seen_workspace = true;
+                continue;
+            }
+            if line == "[[package]]" {
+                section = "package";
+                seen_package = true;
+                continue;
+            }
+            let Some((key, _)) = line.split_once('=') else {
+                continue;
+            };
+            let key = key.trim().trim_matches('"');
+            match section {
+                // `$schema` is the JSON-schema editors use; release-plz itself
+                // ignores unknown `$`-prefixed metadata, keep it out of scope.
+                "" if key == "$schema" => {}
+                "" => panic!("top-level key {key:?} must live under [workspace]"),
+                "workspace" => assert!(
+                    workspace_keys.iter().any(|k| k == key),
+                    "[workspace] has no key {key:?}"
+                ),
+                _ => assert!(
+                    package_keys.iter().any(|k| k == key),
+                    "[[package]] has no key {key:?}"
+                ),
+            }
+        }
+        assert!(seen_workspace && seen_package, "expected both tables");
         assert!(text.contains("publish = false"), "crates.io stays off");
-        assert!(text.contains("git_tag_name = \"v{{ version }}\""));
-        assert!(text.contains("[package]"));
+        assert!(text.contains("version_group = \"voicebar\""));
         assert!(repo_file(".release-plz/changelog.toml").contains("commit_parsers"));
     }
 

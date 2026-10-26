@@ -60,20 +60,43 @@ jobs:
             console.log(`version ${version} consistent across Cargo, package.json and tauri.conf.json`);
           '
       - name: 校验 release-plz 配置
+        # TOML that parses is not enough: release-plz rejects unknown keys with a
+        # bare "invalid config file" after the run has already started. Check the
+        # shape against the vendored schema so a bad key fails here instead.
         shell: python
         run: |
-          import tomllib
+          import json, tomllib
           with open("release-plz.toml", "rb") as f:
               cfg = tomllib.load(f)
+          with open("docs/release-plz.schema.json", "rb") as f:
+              schema = json.load(f)
           with open("src-tauri/Cargo.toml", "rb") as f:
               cargo = tomllib.load(f)["package"]
           with open(".release-plz/changelog.toml", "rb") as f:
               tomllib.load(f)
-          assert cfg["publish"] is False, "publishing to crates.io must stay disabled"
-          assert cfg["git_tag_name"] == "v{{ version }}", cfg["git_tag_name"]
-          assert "v{{ version }}" in cfg["git_release_name"], cfg["git_release_name"]
+
+          defs = schema["$defs"]
+          allowed = {"$schema", "workspace", "package", "changelog"}
+          unknown = set(cfg) - allowed
+          assert not unknown, f"release-plz.toml: unknown top-level keys {sorted(unknown)}"
+
+          workspace = cfg["workspace"]
+          w_known = set(defs["Workspace"]["properties"])
+          w_unknown = set(workspace) - w_known
+          assert not w_unknown, f"[workspace]: unknown keys {sorted(w_unknown)}"
+
+          p_known = set(defs["PackageSpecificConfigWithName"]["properties"])
+          for entry in cfg["package"]:
+              p_unknown = set(entry) - p_known
+              assert not p_unknown, f"[[package]]: unknown keys {sorted(p_unknown)}"
+              assert entry["name"] == "voicebar", entry["name"]
+              assert entry["version_group"] == "voicebar", entry["version_group"]
+
+          assert workspace["publish"] is False, "publishing to crates.io must stay disabled"
+          assert workspace["git_tag_name"] == "v{{ version }}", workspace["git_tag_name"]
+          assert "v{{ version }}" in workspace["git_release_name"], workspace["git_release_name"]
           assert cargo["name"] == "voicebar", "binary name must stay voicebar"
-          print(f"release-plz ok: {cargo['name']} {cargo['version']} -> {cfg['git_release_name']}")
+          print(f"release-plz ok: {cargo['name']} {cargo['version']} -> {workspace['git_release_name']}")
       - name: 校验只有一个 Cargo.lock
         # Cargo.toml at the repo root is the workspace root, so Cargo only reads
         # ./Cargo.lock. A second lock under src-tauri/ is stale by construction:
