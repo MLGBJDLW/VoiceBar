@@ -24,6 +24,7 @@ git push origin v0.1.0        # 触发 Release 工作流，构建首个安装包
 | `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | 生成 `.sig` 签名文件；启用自动更新前才需要 |
 | Discussions | 在 Settings → General 打开，Issue 模板的「使用与配置问题」会跳转到这里 |
 | 分支保护 main | 要求 CI 通过再合并；release-plz 通过 PR 改版本，因此不会直接写 main |
+| Actions 权限 | Settings → Actions → General → Workflow permissions 选择 **Read and write**（release-plz 与 Release 工作流都需要写权限；工作流内已声明 `contents: write`，但仓库默认权限不能是 Read-only） |
 
 ## 4. 标签保护（可选）
 

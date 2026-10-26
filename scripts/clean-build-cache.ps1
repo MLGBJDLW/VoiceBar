@@ -33,15 +33,21 @@ function Get-CacheBytes {
 $before = Get-CacheBytes
 [long]$limit = [long]$MaxCacheMiB * 1MB
 $cleaned = $false
+$shippedDir = Join-Path $projectRoot 'docs\release'
+function Test-Shipped([string]$name) {
+    # -Recurse: 0.1.0 lives in docs/release/0.1.0/, later versions get their own folder.
+    if (-not (Test-Path -LiteralPath $shippedDir -PathType Container)) { return $false }
+    return [bool](Get-ChildItem -LiteralPath $shippedDir -Recurse -File -Filter $name -ErrorAction SilentlyContinue | Select-Object -First 1)
+}
 if ($before -gt $limit) {
-    # Clean only after the current release bundles have been handed out of target.
+    # Clean only after the current bundles are copied to docs/release/<version>/.
     if (-not (Test-Path -LiteralPath $bundleRoot -PathType Container)) {
         throw 'Publish installers before removing the build cache (-Mode portable must copy VoiceBar.exe first).'
     }
     $unpublished = @(Get-ChildItem -LiteralPath $bundleRoot -Recurse -File -Include '*.exe', '*.msi' |
-        Where-Object { $_.Name -like 'VoiceBar_*' -and -not (Get-ChildItem -LiteralPath $projectRoot -File -Filter $_.Name -ErrorAction SilentlyContinue) })
+        Where-Object { $_.Name -like 'VoiceBar_*' -and -not (Test-Shipped $_.Name) })
     if ($unpublished.Count -gt 0) {
-        throw "Installers are still only in target/; copy them out before cleaning: $($unpublished.Name -join ', ')"
+        throw "Installers are still only in target/; copy them to docs/release/<version>/ before cleaning: $($unpublished.Name -join ', ')"
     }
     if ($PSCmdlet.ShouldProcess($cacheRoot, "Remove project-local Cargo cache exceeding $MaxCacheMiB MiB")) {
         if (-not $CargoPath) { $CargoPath = (Get-Command cargo -ErrorAction SilentlyContinue).Source }

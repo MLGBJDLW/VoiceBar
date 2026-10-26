@@ -37,21 +37,27 @@ jobs:
         run: npm run build
       - name: 前端测试（声浪渲染 + 快捷键录制）
         run: npm run test:frontend
-      - name: 校验 JSON 配置
+      - name: 校验版本与发布元数据
+        # release-plz only bumps the Rust crate; the installers read the version
+        # from tauri.conf.json, so the frontend metadata must stay in step.
         run: |
           node -e '
             const fs = require("node:fs");
             const read = (p) => JSON.parse(fs.readFileSync(p, "utf8"));
-            const pkg = read("package.json");
+            const cargo = fs.readFileSync("src-tauri/Cargo.toml", "utf8");
             const conf = read("src-tauri/tauri.conf.json");
-            const lock = read("package-lock.json");
+            const pkg = read("package.json");
             const errors = [];
-            if (pkg.version !== conf.version) errors.push(`package.json ${pkg.version} != tauri.conf.json ${conf.version}`);
-            if (lock.version !== pkg.version || lock.packages[""].version !== pkg.version) errors.push(`package-lock.json ${lock.version} is stale (expected ${pkg.version})`);
+            const version = /^version = "([^"]+)"/m.exec(cargo)?.[1];
+            if (!version) errors.push("src-tauri/Cargo.toml has no [package] version");
+            if (conf.version !== version) errors.push(`tauri.conf.json ${conf.version} != Cargo ${version}`);
+            if (pkg.version !== version) errors.push(`package.json ${pkg.version} != Cargo ${version}`);
             if (pkg.name !== "voicebar") errors.push("package.json name must stay voicebar (release-plz renames the binary)");
             if (conf.identifier !== "studio.voicebar.desktop") errors.push("tauri identifier changed unexpectedly");
+            if (conf.productName !== "VoiceBar") errors.push("productName drives installer file names");
+            if (!(conf.bundle.icon || []).length) errors.push("bundle.icon is empty");
             if (errors.length) { console.error(errors.join("\n")); process.exit(1); }
-            console.log(`versions consistent: ${pkg.version}`);
+            console.log(`version ${version} consistent across Cargo, package.json and tauri.conf.json`);
           '
       - name: 校验 release-plz 配置
         shell: python
