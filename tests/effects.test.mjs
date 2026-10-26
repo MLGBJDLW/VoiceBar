@@ -1,12 +1,31 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import test from 'node:test';
-import ts from 'typescript';
+import { EffectRenderer } from '../src/effects.ts';
 
 // Exercise the production renderer with a deterministic clock and canvas paths.
-const source = await readFile(new URL('../src/effects.ts', import.meta.url), 'utf8');
-const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText;
-const { EffectRenderer } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`);
+// The module is imported straight from source: Node strips the types, so the
+// test no longer depends on the TypeScript compiler API. That API is no longer
+// on the `typescript` root export (7.x ships it under `typescript/unstable/*`
+// and dropped `transpileModule`), and `src/` is kept to erasable syntax so this
+// stays a plain import.
+// Node only strips erasable syntax, so `src/` must not use constructs the
+// stripper rejects (enums, namespaces, parameter properties). Catching that here
+// keeps every test a plain import instead of a compiler-API call.
+test('src/ stays within erasable TypeScript syntax', async () => {
+  const { readdir, readFile } = await import('node:fs/promises');
+  const dir = new URL('../src/', import.meta.url);
+  const offences = [];
+  for (const name of (await readdir(dir)).filter(f => f.endsWith('.ts'))) {
+    const body = await readFile(new URL(name, dir), 'utf8');
+    for (const [line, content] of body.split('\n').entries()) {
+      if (/^\s*(export\s+)?(declare\s+)?(const\s+)?enum\s/.test(content)) offences.push(`${name}:${line + 1} enum`);
+      if (/^\s*(export\s+)?namespace\s/.test(content)) offences.push(`${name}:${line + 1} namespace`);
+      if (/constructor\s*\([^)]*\b(?:public|private|protected|readonly)\b/.test(content)) offences.push(`${name}:${line + 1} parameter property`);
+    }
+  }
+  assert.deepEqual(offences, [], 'non-erasable syntax breaks Node type stripping');
+});
+
 const effects = ['ribbon', 'spectrum', 'bars', 'orbit'];
 
 function fixture(effect = 'ribbon', reduced = false, intensity = 1) {
