@@ -19,6 +19,10 @@ function strength(level: number, gain: number) {
 /** A single canvas, one owned frame callback, no hidden or idle animation. */
 export class EffectRenderer {
   private ctx: CanvasRenderingContext2D;
+  // Declared, not a constructor parameter property: parameter properties are the
+  // one construct that Node's type stripping cannot erase, and tests import this
+  // file directly instead of transpiling it.
+  private canvas: HTMLCanvasElement;
   private config: Appearance | null = null;
   private level = 0; private target = 0; private bands: number[] = []; private bandTargets: number[] = [];
   private lastInput = 0;
@@ -26,7 +30,8 @@ export class EffectRenderer {
   private active = false; private demo = false; private observer: IntersectionObserver;
   private resize: ResizeObserver; private media = matchMedia('(prefers-reduced-motion: reduce)');
   private onVisibility = () => this.sync();
-  constructor(private canvas: HTMLCanvasElement) {
+  constructor(canvas: HTMLCanvasElement) {
+    this.canvas = canvas;
     this.ctx = canvas.getContext('2d')!;
     this.observer = new IntersectionObserver(([entry]) => { this.visible = entry.isIntersecting; this.sync(); });
     this.observer.observe(canvas);

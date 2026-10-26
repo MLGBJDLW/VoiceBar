@@ -1,12 +1,10 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import test from 'node:test';
-import ts from 'typescript';
+import { eventToAccel, formatAccel, displayAccel, parseAccel } from '../src/shortcut.ts';
 
-// Exercises the real shortcut recorder from the settings page.
-const source = await readFile(new URL('../src/shortcut.ts', import.meta.url), 'utf8');
-const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText;
-const { eventToAccel, formatAccel, displayAccel, parseAccel } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`);
+// Exercises the real shortcut recorder from the settings page, imported straight
+// from source: Node strips the types, so the test needs no TypeScript compiler
+// API (7.x no longer exposes `transpileModule` on the `typescript` root export).
 
 const key = (code, extra = {}) => ({ code, key: extra.key ?? code, ctrlKey: false, altKey: false, shiftKey: false, metaKey: false, ...extra });
 
