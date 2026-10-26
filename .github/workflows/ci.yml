@@ -141,5 +141,5 @@ jobs:
       - name: 记录产物体积
         shell: pwsh
         run: |
-          Get-Item 'src-tauri/target/release/voicebar.exe', 'src-tauri/target/release/WebView2Loader.dll' |
+          Get-Item 'target/release/voicebar.exe', 'target/release/WebView2Loader.dll' |
             Select-Object Name, Length | Format-Table | Out-String | Write-Host
