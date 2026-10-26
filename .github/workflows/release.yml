@@ -74,25 +74,23 @@ jobs:
             fi
             id="$EVENT_RELEASE_ID"
           else
-            # `gh api` writes the error body to stdout on 404, so `|| true`
-            # alone left `json` non-empty ('{"message":"Not Found"...}') and
-            # every first release was wrongly reported as already published.
-            # Decide on the HTTP status code instead of on empty output.
-            if json=$(gh api "repos/$REPO/releases/tags/$tag" 2>/dev/null); then
-              id=$(echo "$json" | jq -r '.id')
-              draft=$(echo "$json" | jq -r '.draft')
+            # The tag endpoint excludes unpublished drafts. List authenticated
+            # releases so retries reuse the existing draft instead of creating
+            # another release for the same tag. API failures abort via pipefail.
+            json=$(gh api --paginate "repos/$REPO/releases?per_page=100" |
+              jq -s --arg tag "$tag" '[.[][] | select(.tag_name == $tag)]')
+            count=$(echo "$json" | jq 'length')
+            if [ "$count" -gt 1 ]; then
+              echo "::error::标签 $tag 对应多个 Release，拒绝选择或覆盖；请保留唯一草稿后重试。"
+              exit 1
+            elif [ "$count" -eq 1 ]; then
+              id=$(echo "$json" | jq -r '.[0].id')
+              draft=$(echo "$json" | jq -r '.[0].draft')
               if [ "$draft" != "true" ]; then
                 echo "::error::Release $tag 已正式发布，拒绝重新构建覆盖资产。请先手动将其转为草稿。"
                 exit 1
               fi
             else
-              # A bare `... | grep -o` aborts under `set -euo pipefail` when
-              # grep finds nothing, so capture the text and match it instead.
-              err=$(gh api "repos/$REPO/releases/tags/$tag" 2>&1 >/dev/null || true)
-              case "$err" in
-                *"HTTP 404"*) ;;
-                *) echo "::error::读取 Release $tag 失败（既不存在也不是 404），先人工确认。"; exit 1 ;;
-              esac
               id=$(gh api -X POST "repos/$REPO/releases" \
                 -f tag_name="$tag" -f name="VoiceBar $tag" -F draft=true -F prerelease=false | jq -r '.id')
             fi
@@ -157,6 +155,36 @@ jobs:
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.platform.args }}
+
+      - name: 打包并上传 Windows 便携版
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release-id }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = (Get-Content 'src-tauri/tauri.conf.json' -Raw -Encoding UTF8 | ConvertFrom-Json).version
+          $name = "VoiceBar_${version}_x64-portable.zip"
+          $stage = '.nexa/tmp/release-portable/files'
+          New-Item -ItemType Directory -Force $stage | Out-Null
+          Copy-Item 'target/release/voicebar.exe' "$stage/VoiceBar.exe"
+          Copy-Item 'LICENSE' "$stage/LICENSE"
+          if (Test-Path 'target/release/WebView2Loader.dll') {
+            Copy-Item 'target/release/WebView2Loader.dll' "$stage/WebView2Loader.dll"
+          }
+          $zip = ".nexa/tmp/release-portable/$name"
+          Compress-Archive -Path "$stage/*" -DestinationPath $zip -CompressionLevel Optimal -Force
+          $release = gh api "repos/$env:REPO/releases/$env:RELEASE_ID" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Reading draft release failed' }
+          foreach ($old in @($release.assets | Where-Object name -eq $name)) {
+            gh api --method DELETE "repos/$env:REPO/releases/assets/$($old.id)"
+            if ($LASTEXITCODE -ne 0) { throw 'Replacing portable asset failed' }
+          }
+          $upload = ($release.upload_url -split '\{')[0]
+          gh api --method POST "${upload}?name=$name" -H 'Content-Type: application/zip' --input $zip > $null
+          if ($LASTEXITCODE -ne 0) { throw 'Uploading portable asset failed' }
+          Get-Item $zip | Select-Object Name, Length
 
       - uses: actions/checkout@v7
         with:
@@ -241,10 +269,10 @@ jobs:
           set -euo pipefail
           assets=$(gh api "repos/$REPO/releases/$RELEASE_ID" --jq '.assets[].name')
           echo "$assets"
-          # Match with case, not `grep <<<`: on the Windows Git Bash runner the
-          # here-string plus `set -e` made a present asset read as missing.
+          # Check the remote inventory first; the verifier below also needs
+          # both installer formats downloaded into its local assets directory.
           missing=0
-          for suffix in x64-setup.exe x64_en-US.msi; do
+          for suffix in x64-setup.exe x64_en-US.msi x64_zh-CN.msi x64-portable.zip; do
             case $assets in
               *"$suffix"*) ;;
               *) echo "::error::缺少资产：*$suffix"; missing=1 ;;
@@ -261,7 +289,7 @@ jobs:
             # Same reason as the build job: `gh release download` needs a tag, and
             # a duplicate draft made the tag lookup resolve to nothing.
             mkdir -p verify
-            for want in latest.json x64-setup.exe; do
+            for want in latest.json x64-setup.exe x64_en-US.msi; do
               asset=$(gh api "repos/$REPO/releases/$RELEASE_ID" \
                         --jq ".assets[] | select(.name | endswith(\"$want\")) | .name + \" \" + .url" | head -n1)
               [ -n "$asset" ] || { echo "::error::草稿 Release 缺少 $want"; exit 1; }
