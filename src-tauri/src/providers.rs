@@ -274,7 +274,10 @@ fn wav(samples: &[i16]) -> Vec<u8> {
     out
 }
 fn xfyun_url(config: &ProviderConfig) -> Result<String> {
-    use hmac::{Hmac, Mac};
+    // hmac 0.13 / sha2 0.11 run on digest 0.11, where keyed construction moved
+    // from `Mac::new_from_slice` to the `KeyInit` trait. `new_from_slice` still
+    // exists as an inherent `KeyInit` method for variable-length secrets.
+    use hmac::{Hmac, KeyInit, Mac};
     use sha2::Sha256;
     let mut url = url::Url::parse(&config.endpoint)?;
     let host = url
