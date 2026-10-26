@@ -171,8 +171,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # Download by release id: a leftover draft for the same tag makes
+          # `gh release download <tag>` pick nothing ("no assets to download").
           mkdir -p dist-assets
-          gh release download "${{ needs.create-release.outputs.tag }}" \
+          gh release download "${{ needs.create-release.outputs.release-id }}" \
             --repo "${{ github.repository }}" \
             --pattern "*x64-setup.exe" --dir dist-assets
           ls -l dist-assets
@@ -195,7 +197,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh release upload "${{ needs.create-release.outputs.tag }}" latest.json \
+          gh release upload "${{ needs.create-release.outputs.release-id }}" latest.json \
             --repo "${{ github.repository }}" --clobber
 
   publish:
@@ -238,8 +240,8 @@ jobs:
               exit 1
             fi
             mkdir -p verify
-            gh release download "$TAG" --repo "$REPO" --pattern "latest.json" --dir verify
-            gh release download "$TAG" --repo "$REPO" --pattern "*x64-setup.exe" --dir verify
+            gh release download "$RELEASE_ID" --repo "$REPO" --pattern "latest.json" --dir verify
+            gh release download "$RELEASE_ID" --repo "$REPO" --pattern "*x64-setup.exe" --dir verify
             node scripts/verify-release.mjs --manifest verify/latest.json --assets-dir verify \
               --tag "$TAG" --repo "$REPO"
           fi
