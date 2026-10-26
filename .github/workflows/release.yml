@@ -257,9 +257,17 @@ jobs:
               echo "::error::缺少 latest.json（已配置签名密钥，应用内更新依赖该文件）"
               exit 1
             fi
+            # Same reason as the build job: `gh release download` needs a tag, and
+            # a duplicate draft made the tag lookup resolve to nothing.
             mkdir -p verify
-            gh release download "$RELEASE_ID" --repo "$REPO" --pattern "latest.json" --dir verify
-            gh release download "$RELEASE_ID" --repo "$REPO" --pattern "*x64-setup.exe" --dir verify
+            for want in latest.json x64-setup.exe; do
+              asset=$(gh api "repos/$REPO/releases/$RELEASE_ID" \
+                        --jq ".assets[] | select(.name | endswith(\"$want\")) | .name + \" \" + .url" | head -n1)
+              [ -n "$asset" ] || { echo "::error::草稿 Release 缺少 $want"; exit 1; }
+              name=${asset% *}; url=${asset#* }
+              gh api -H "Accept: application/octet-stream" "$url" > "verify/$name"
+            done
+            ls -l verify
             node scripts/verify-release.mjs --manifest verify/latest.json --assets-dir verify \
               --tag "$TAG" --repo "$REPO"
           fi
