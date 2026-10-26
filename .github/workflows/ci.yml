@@ -139,7 +139,13 @@ jobs:
       - name: 生产构建（custom-protocol）
         run: cargo build --release --features custom-protocol --manifest-path src-tauri/Cargo.toml
       - name: 记录产物体积
+        # `cargo build` only produces the exe: WebView2Loader.dll is copied next
+        # to it by the bundler, so listing it as required failed after a green
+        # build. Report whatever exists and fail only if the exe is missing.
         shell: pwsh
         run: |
-          Get-Item 'target/release/voicebar.exe', 'target/release/WebView2Loader.dll' |
+          $exe = 'target/release/voicebar.exe'
+          if (-not (Test-Path $exe)) { throw "missing $exe" }
+          Get-ChildItem 'target/release' -File |
+            Where-Object { $_.Name -in @('voicebar.exe', 'WebView2Loader.dll') } |
             Select-Object Name, Length | Format-Table | Out-String | Write-Host
