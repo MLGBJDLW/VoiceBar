@@ -7,7 +7,11 @@ pub fn devices() -> Result<Vec<String>, String> {
     cpal::default_host()
         .input_devices()
         .map_err(|e| e.to_string())?
-        .map(|d| d.name().map_err(|e| e.to_string()))
+        .map(|d| {
+            d.description()
+                .map(|description| description.name().to_owned())
+                .map_err(|e| e.to_string())
+        })
         .collect()
 }
 pub struct Capture {
@@ -33,7 +37,10 @@ impl Capture {
                 } else {
                     host.input_devices()
                         .map_err(|e| e.to_string())?
-                        .find(|d| d.name().ok().as_deref() == Some(&device_name))
+                        .find(|d| {
+                            d.description()
+                                .is_ok_and(|description| description.name() == device_name)
+                        })
                         .ok_or("所选麦克风已断开，请重新选择")?
                 };
                 let supported = device.default_input_config().map_err(|e| e.to_string())?;
@@ -108,14 +115,14 @@ where
     f32: FromSample<T>,
 {
     let channels = config.channels as usize;
-    let mut converter = Converter::new(config.sample_rate.0);
+    let mut converter = Converter::new(config.sample_rate);
     let mut analyzer = crate::voice_visual::Analyzer::new();
     let session_id = runtime.counter.load(std::sync::atomic::Ordering::SeqCst);
     let stream_errors = errors.clone();
     let mut failed = false;
     device
         .build_input_stream(
-            config,
+            *config,
             move |data: &[T], _| {
                 if failed {
                     return;
