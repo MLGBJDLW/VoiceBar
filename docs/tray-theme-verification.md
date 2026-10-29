@@ -38,4 +38,4 @@
 
 首次远端 MSVC 构建因应用与 GPUI 的重复 Manifest 发生 CVT1100 / LNK1123，未发布。修复后应用资源只在链接期嵌入图标，打包时用 Windows SDK mt.exe 校验并写入应用完整清单。本地重跑 83 项回归和单独菜单夹具通过；重打包成功。最终 EXE 的 PE 资源枚举确认仅有一个 RT_MANIFEST（ID 1，语言 1033），包含应用身份；mt.exe 提取后再次校验成功。
 
-GitHub 发布及缓存清理的最终结果见本版本发布记录。
+GitHub v0.2.0 已正式发布，CI 和 Release 均成功。根目录 EXE 已替换为正式 MSVC 便携版；上表保留本地 GNU 构建时的历史测量值，本地 GNU 包及 target 已在最后清理。正式附件哈希、签名验证和约 5.87 GB 清理结果见 [发布后验证记录](release/0.2.0/VERIFICATION.md)。
