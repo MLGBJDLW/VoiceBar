@@ -25,6 +25,9 @@
 | 更新与联网默认值 | 保留并迁移实现 | 旧版和当前版 update_check 默认 auto；原生 updater.rs 固定读取 GitHub latest.json 并校验 minisign / SHA-256。未声称完全离线或真实安装版升级已实测。 |
 | 命令行控制 | 当前兼容性缺口 | 当前 main.rs 只解析 --hidden；全源码无 --toggle / --cancel 实现。已纠正 README 和发布说明，未把旧版宏控制误写为原生版已支持。 |
 | Windows 发行包 | 打包方式改变 | 当前 scripts/build.ps1 / installer.nsi 生成 x64 NSIS 与便携 ZIP，不生成旧 MSI。签名仅用于应用更新校验，不等同于 Authenticode 发布者签名。 |
+| Windows 清单资源 | 发布阻断修复 | 首次 MSVC CI / Release 因重复 RT_MANIFEST #1 出现 CVT1100 / LNK1123；gpui-component 间接启用 GPUI 默认清单。应用 .rc 改为仅图标，打包时用 Windows SDK mt.exe 校验并替换唯一清单；未把失败的首次工作流写成通过。 |
+
+第二次远端构建已通过 MSVC 测试、生产构建、NSIS/ZIP 打包和签名，但说明更新请求未显式包含 tag_name，草稿标签变为 untagged，上传前的身份校验正确阻止了上传。后续修正为所有 Release PATCH 均显式传递标签，并在上传前保存已签名产物。该失败尝试不计为成功发布。
 
 ## 验证口径
 
@@ -32,4 +35,4 @@
 
 前期快捷键完整录入夹具仍有前台焦点前置条件未完成的记录，不能将普通状态机/注册事务回归写成全部实机按键验收通过。真实麦克风、七种云/本机服务、登录自启、安装/卸载、旧版原地更新均不计为本轮实测通过。
 
-MSVC 远端构建、签名资产与正式发布状态以 GitHub Actions 和 Release 的最终结果为准，未完成前不写为成功。
+最终 MSVC CI 40807646952 与 Release 40807646854 均成功，v0.2.0 已正式发布且为 latest；正式下载、应用公钥验签及清理记录见 [发布后验证记录](VERIFICATION.md)。本记录区分了此前失败尝试与最终成功结果。
