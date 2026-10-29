@@ -1,3 +1,3 @@
-#define RT_MANIFEST 24
-1 RT_MANIFEST "resources/voicebar.manifest"
+// gpui-component enables gpui/windows-manifest. Embed only the app icon here;
+// a second RT_MANIFEST #1 fails MSVC linking with CVT1100 / LNK1123.
 1 ICON "icons/icon.ico"
