@@ -27,6 +27,8 @@
 | Windows 发行包 | 打包方式改变 | 当前 scripts/build.ps1 / installer.nsi 生成 x64 NSIS 与便携 ZIP，不生成旧 MSI。签名仅用于应用更新校验，不等同于 Authenticode 发布者签名。 |
 | Windows 清单资源 | 发布阻断修复 | 首次 MSVC CI / Release 因重复 RT_MANIFEST #1 出现 CVT1100 / LNK1123；gpui-component 间接启用 GPUI 默认清单。应用 .rc 改为仅图标，打包时用 Windows SDK mt.exe 校验并替换唯一清单；未把失败的首次工作流写成通过。 |
 
+第二次远端构建已通过 MSVC 测试、生产构建、NSIS/ZIP 打包和签名，但说明更新请求未显式包含 tag_name，草稿标签变为 untagged，上传前的身份校验正确阻止了上传。后续修正为所有 Release PATCH 均显式传递标签，并在上传前保存已签名产物。该失败尝试不计为成功发布。
+
 ## 验证口径
 
 本轮本地 GNU `cargo test --workspace --locked --quiet` 为 83 passed / 0 failed / 4 ignored。托盘原生菜单夹具单独运行 1 passed；Node 更新清单测试 11 passed。三档 DPI 的 GDI 像素检查通过；辅助功能字符串及高对比度分支的菜单标志已检查，未更改用户高对比度设置。

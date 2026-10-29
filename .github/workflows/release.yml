@@ -104,7 +104,7 @@ jobs:
           test -s "$notes_file" || { echo "::error::Missing reviewed release notes for $tag"; exit 1; }
           gh api "repos/$REPO/releases/$id" |
             jq -e --arg tag "$tag" '.draft == true and .tag_name == $tag' >/dev/null
-          jq -n --rawfile body "$notes_file" '{body: $body}' > "$RUNNER_TEMP/voicebar-release-notes.json"
+          jq -n --arg tag "$tag" --rawfile body "$notes_file" '{tag_name: $tag, body: $body}' > "$RUNNER_TEMP/voicebar-release-notes.json"
           gh api -X PATCH "repos/$REPO/releases/$id" --input "$RUNNER_TEMP/voicebar-release-notes.json" >/dev/null
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "release-id=$id" >> "$GITHUB_OUTPUT"
@@ -204,6 +204,17 @@ jobs:
           if (-not (Test-Path "$bundle.sig")) { throw 'Missing updater signature' }
           node scripts/verify-release.mjs --manifest artifacts/latest.json --assets-dir artifacts --tag $env:TAG --repo $env:REPO
           if ($LASTEXITCODE -ne 0) { throw 'Verifying latest.json failed' }
+      - name: 保存已签名发布产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: voicebar-${{ needs.create-release.outputs.tag }}-windows-x64
+          path: |
+            artifacts/*_x64-setup.exe
+            artifacts/*_x64-portable.zip
+            artifacts/*.exe.sig
+            artifacts/latest.json
+          if-no-files-found: error
+          retention-days: 3
       - name: 上传到唯一草稿 Release
         shell: pwsh
         env:
@@ -293,5 +304,5 @@ jobs:
           # A concurrent manual publication must never be overwritten.
           gh api "repos/$REPO/releases/$RELEASE_ID" |
             jq -e --arg tag "$TAG" '.draft == true and .tag_name == $tag' >/dev/null
-          gh api -X PATCH "repos/$REPO/releases/$RELEASE_ID" -F draft=false >/dev/null
+          gh api -X PATCH "repos/$REPO/releases/$RELEASE_ID" -f tag_name="$TAG" -F draft=false >/dev/null
           echo "已发布：https://github.com/$REPO/releases/tag/$TAG"
