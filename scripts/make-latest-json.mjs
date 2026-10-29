@@ -78,17 +78,12 @@ export function isSignature(text) {
 // Signs with the project's tauri CLI and returns the .sig contents (base64).
 // --app-version binds the version into the signature's trusted comment, so a
 // tampered manifest cannot pair a newer version number with an older installer.
-export function signFile(bundle, version, tauriCli = join(root, 'node_modules', '@tauri-apps', 'cli', 'tauri.js')) {
-  const key = process.env.TAURI_SIGNING_PRIVATE_KEY;
-  if (!key) throw new Error('TAURI_SIGNING_PRIVATE_KEY is required to sign the updater bundle');
-  // The CLI takes the key literally (not a path) and writes `<bundle>.sig` next
-  // to the bundle; it also prints the signature, so read the file it names.
-  const output = execFileSync(
-    process.execPath,
-    [tauriCli, 'signer', 'sign', '--private-key', key, '--app-version', version, bundle],
-    { encoding: 'utf8', env: process.env },
-  );
-  const sigPath = /signature here:\s*\r?\n\s*(.+\.sig)/.exec(output)?.[1]?.trim() ?? `${bundle}.sig`;
+export function signFile(bundle, version) {
+  if (!process.env.TAURI_SIGNING_PRIVATE_KEY) throw new Error('TAURI_SIGNING_PRIVATE_KEY is required to sign the updater bundle');
+  execFileSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+    join(root, 'scripts', 'sign-update.ps1'), '-Bundle', bundle, '-Version', version],
+    { encoding: 'utf8', env: process.env });
+  const sigPath = `${bundle}.sig`;
   const signature = readFileSync(sigPath, 'utf8').trim();
   if (!isSignature(signature)) throw new Error(`unexpected signature in ${sigPath}`);
   return signature;

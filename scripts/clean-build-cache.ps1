@@ -1,73 +1,38 @@
-[CmdletBinding(SupportsShouldProcess = $true)]
+[CmdletBinding(SupportsShouldProcess=$true)]
 param(
-    [ValidateRange(0, 16384)]
-    [int]$MaxCacheMiB = 512,
+    [ValidateRange(0,16384)][int]$MaxCacheMiB = 512,
     [string]$CargoPath = ''
 )
 $ErrorActionPreference = 'Stop'
-$projectRoot = Split-Path -Parent $PSScriptRoot
-$cacheRoot = Join-Path $projectRoot 'target'
-$manifest = Join-Path $projectRoot 'Cargo.toml'
-$bundleRoot = Join-Path $cacheRoot 'release\bundle'
-
+$root = Split-Path -Parent $PSScriptRoot
+$target = Join-Path $root 'target'
 function Get-CacheBytes {
-    if (-not (Test-Path -LiteralPath $cacheRoot)) { return [long]0 }
-    if ((Get-Item -LiteralPath $cacheRoot -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+    if (-not (Test-Path -LiteralPath $target)) { return [long]0 }
+    if ((Get-Item -LiteralPath $target -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
         throw 'Refusing to clean a linked target directory.'
     }
-    [long]$bytes = 0
+    [long]$total = 0
     $pending = New-Object 'System.Collections.Generic.Stack[string]'
-    $pending.Push($cacheRoot)
-    while ($pending.Count -gt 0) {
+    $pending.Push($target)
+    while ($pending.Count) {
         foreach ($entry in Get-ChildItem -LiteralPath $pending.Pop() -Force) {
-            if ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) {
-                throw "Refusing to traverse a linked cache entry: $($entry.FullName)"
-            }
-            if ($entry.PSIsContainer) { $pending.Push($entry.FullName) }
-            else { $bytes += $entry.Length }
+            if ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Linked cache entry detected.' }
+            if ($entry.PSIsContainer) { $pending.Push($entry.FullName) } else { $total += $entry.Length }
         }
     }
-    return $bytes
+    return $total
 }
-
 $before = Get-CacheBytes
-[long]$limit = [long]$MaxCacheMiB * 1MB
-$cleaned = $false
-$shippedDir = Join-Path $projectRoot 'docs\release'
-function Test-Shipped([string]$name) {
-    # -Recurse: 0.1.0 lives in docs/release/0.1.0/, later versions get their own folder.
-    if (-not (Test-Path -LiteralPath $shippedDir -PathType Container)) { return $false }
-    return [bool](Get-ChildItem -LiteralPath $shippedDir -Recurse -File -Filter $name -ErrorAction SilentlyContinue | Select-Object -First 1)
-}
+$limit = [long]$MaxCacheMiB * 1MB
 if ($before -gt $limit) {
-    # Clean only after the current bundles are copied to docs/release/<version>/.
-    if (-not (Test-Path -LiteralPath $bundleRoot -PathType Container)) {
-        throw 'Publish installers before removing the build cache (-Mode portable must copy VoiceBar.exe first).'
+    if (-not (Test-Path -LiteralPath (Join-Path $root 'VoiceBar.exe') -PathType Leaf)) {
+        throw 'Copy the current native executable to VoiceBar.exe before cleaning.'
     }
-    $unpublished = @(Get-ChildItem -LiteralPath $bundleRoot -Recurse -File -Include '*.exe', '*.msi' |
-        Where-Object { $_.Name -like 'VoiceBar_*' -and -not (Test-Shipped $_.Name) })
-    if ($unpublished.Count -gt 0) {
-        throw "Installers are still only in target/; copy them to docs/release/<version>/ before cleaning: $($unpublished.Name -join ', ')"
-    }
-    if ($PSCmdlet.ShouldProcess($cacheRoot, "Remove project-local Cargo cache exceeding $MaxCacheMiB MiB")) {
-        if (-not $CargoPath) { $CargoPath = (Get-Command cargo -ErrorAction SilentlyContinue).Source }
-        if (-not $CargoPath) { $CargoPath = Join-Path $env:USERPROFILE '.cargo\bin\cargo.exe' }
-        if (-not (Test-Path -LiteralPath $CargoPath -PathType Leaf)) { throw 'Cargo is required to clean its build cache.' }
-        # Explicit target-dir prevents environment settings from selecting a shared cache.
-        # Cargo acquires its own build-directory lock before deleting artifacts.
-        & $CargoPath clean --manifest-path $manifest --target-dir $cacheRoot
+    if ($PSCmdlet.ShouldProcess($target, 'Remove only this project Cargo cache')) {
+        if (-not $CargoPath) { $CargoPath = (Get-Command cargo -ErrorAction Stop).Source }
+        & $CargoPath clean --manifest-path (Join-Path $root 'Cargo.toml') --target-dir $target
         if ($LASTEXITCODE -ne 0) { throw 'Cargo cache cleanup failed.' }
-        $cleaned = $true
     }
 }
 $after = Get-CacheBytes
-if (-not $WhatIfPreference -and $after -gt $limit) { throw 'Build cache remains above the configured limit.' }
-[pscustomobject]@{
-    CachePath = $cacheRoot
-    LimitBytes = $limit
-    BeforeBytes = $before
-    AfterBytes = $after
-    FreedBytes = $before - $after
-    Cleaned = $cleaned
-    Preview = [bool]$WhatIfPreference
-} | ConvertTo-Json -Compress
+[pscustomobject]@{CachePath=$target;BeforeBytes=$before;AfterBytes=$after;FreedBytes=($before-$after);LimitBytes=$limit} | ConvertTo-Json -Compress

@@ -1,10 +1,6 @@
 name: Icons
 
-# Rasterizes src-tauri/icons/app-icon.svg into the PNG/ICO set used by the
-# bundles, then commits the result. Run manually after changing the artwork;
-# the final step fails if a previous run chose a different pixel size, which
-# keeps output deterministic (no endless "icons changed" commits).
-
+# Generate the native Windows PNG/ICO assets from the SVG using Node built-ins.
 on:
   workflow_dispatch:
     inputs:
@@ -25,28 +21,44 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 24
-      - name: 生成图标
+      - name: 生成原生图标
         run: node scripts/render-icons.mjs
-      - name: 校验尺寸
+      - name: 校验尺寸与重复生成结果
         run: |
-          node -e '
-            const fs = require("node:fs");
-            const expected = {"32x32.png":32,"128x128.png":128,"128x128@2x.png":256,"icon.png":512,"icon_16x16.png":16,"icon_32x32.png":32,"icon_48x48.png":48,"icon_256x256.png":256};
-            for (const [name, size] of Object.entries(expected)) {
-              const b = fs.readFileSync(`src-tauri/icons/${name}`);
-              const w = b.readUInt32BE(16), h = b.readUInt32BE(20);
-              if (w !== size || h !== size) { console.error(`${name}: ${w}x${h}, expected ${size}`); process.exit(1); }
-            }
-            const ico = fs.readFileSync("src-tauri/icons/icon.ico");
-            if (ico.readUInt16LE(2) !== 1 || ico.readUInt16LE(4) !== 4) { console.error("icon.ico must contain 4 entries"); process.exit(1); }
-            console.log("icon sizes ok");
-          '
+          node --input-type=module - <<'NODE'
+          import assert from 'node:assert/strict';
+          import { readFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          import { execFileSync } from 'node:child_process';
+          import { icons } from './scripts/render-icons.mjs';
+          const expected = {
+            '32x32.png': 32, '128x128.png': 128, 'icon.png': 512,
+            'icon_16x16.png': 16, 'icon_32x32.png': 32,
+            'icon_48x48.png': 48, 'icon_256x256.png': 256
+          };
+          const before = new Map();
+          for (const [name, size] of Object.entries(expected)) {
+            const b = readFileSync(join(icons, name));
+            assert.equal(b.readUInt32BE(16), size, name);
+            assert.equal(b.readUInt32BE(20), size, name);
+            before.set(name, b);
+          }
+          const ico = readFileSync(join(icons, 'icon.ico'));
+          assert.equal(ico.readUInt16LE(2), 1);
+          assert.equal(ico.readUInt16LE(4), 4);
+          before.set('icon.ico', ico);
+          execFileSync(process.execPath, ['scripts/render-icons.mjs'], { stdio: 'inherit' });
+          for (const [name, bytes] of before) {
+            assert.deepEqual(readFileSync(join(icons, name)), bytes, name);
+          }
+          console.log('native icon dimensions and deterministic output OK');
+          NODE
       - name: 提交
         if: inputs.commit
         run: |
-          if git diff --quiet -- src-tauri/icons; then echo "icons already up to date"; exit 0; fi
+          git add -- crates/voicebar/icons
+          if git diff --cached --quiet -- crates/voicebar/icons; then echo "icons already up to date"; exit 0; fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src-tauri/icons
-          git commit -m "chore(icons): regenerate app icons from app-icon.svg"
+          git commit -m "chore(icons): regenerate native app icons from app-icon.svg"
           git push

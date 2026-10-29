@@ -1,4 +1,10 @@
-# Root-only tooling notes. This file exists so that the workspace marker
-# (Cargo.toml) at the root does not hide tracked root-level files from Cargo.
-# Nothing is built from here; the application lives in src-tauri/.
-roots = []
+[build]
+target = "x86_64-pc-windows-gnu"
+
+[target.x86_64-pc-windows-gnu]
+# Use the installed MinGW import libraries (DWM, scaling and registry APIs).
+linker = "gcc"
+
+[env]
+# The Windows SDK shader compiler; individual build environments can override it.
+GPUI_FXC_PATH = { value = "C:/Program Files (x86)/Windows Kits/10/bin/10.0.18362.0/x64/fxc.exe", force = false }

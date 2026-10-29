@@ -1,5 +1,7 @@
 # VoiceBar v0.1.0
 
+> 历史归档：以下为旧 Tauri/WebView 发布说明。旧 EXE、MSI 和便携包已于 2026-10-28 从本目录清理；签名与哈希保留作历史记录。当前 GPUI 产物位于仓库根目录和 `artifacts/`，详情见 [原生版验证](../../native-verification.md)。
+
 <img src="docs/logo.svg" width="72" height="72" alt="VoiceBar">
 
 **按下快捷键，说完就有字。** Windows 10/11 x64 桌面语音输入工具的首个开源版本。

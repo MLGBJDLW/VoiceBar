@@ -12,7 +12,7 @@ test('versions normalize from tags and reject non-semver', () => {
   assert.throws(() => normalizeVersion('v1.2'), /semver/);
 });
 
-test('installer name matches the Tauri NSIS bundle naming', () => {
+test('installer name matches the native NSIS bundle naming', () => {
   assert.equal(installerName('0.2.0'), 'VoiceBar_0.2.0_x64-setup.exe');
 });
 
@@ -35,7 +35,7 @@ test('manifest has the keys the Rust updater reads', () => {
   );
   assert.equal(platform.signature, 'SIG');
   assert.equal(platform.sha256, 'abc');
-  // Tauri validates every platform entry, so only known-good keys may appear there.
+  // Keep the signed update manifest limited to the fields the native updater reads.
   assert.deepEqual(Object.keys(platform).sort(), ['sha256', 'signature', 'url']);
 });
 
@@ -101,8 +101,11 @@ test('verification refuses a version that differs from the tag', () => {
   assert.match(verifyRelease(f)[0], /version 0\.2\.0 != 标签 v0\.3\.0/);
 });
 
-test('verification requires the MSI as well as the NSIS installer', () => {
+test('native release requires the NSIS installer and does not require MSI', () => {
   const f = fixture();
   for (const name of [...f.assets.keys()]) if (name.endsWith('.msi')) f.assets.delete(name);
-  assert.deepEqual(verifyRelease(f), ['缺少资产：*x64_en-US.msi']);
+  assert.deepEqual(verifyRelease(f), []);
+  const name = installerName(f.manifest.version);
+  f.assets.delete(name);
+  assert.ok(verifyRelease(f).some(problem => problem.includes('缺少资产')));
 });

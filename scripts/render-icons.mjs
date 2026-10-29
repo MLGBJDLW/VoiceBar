@@ -1,7 +1,7 @@
 // Icon rasterizer used by .github/workflows/icons.yml (and local maintenance).
-// Rasterizes src-tauri/icons/app-icon.svg with a tiny scanline renderer so CI
-// does not need a browser or native dependencies:
-//   node scripts/render-icons.mjs      # writes PNGs into src-tauri/icons/
+// Rasterizes crates/voicebar/icons/app-icon.svg with a tiny scanline renderer.
+// It uses Node built-ins only; no browser or package installation is needed:
+//   node scripts/render-icons.mjs      # writes PNG/ICO into crates/voicebar/icons/
 // Only the primitives used by app-icon.svg are supported (rect + stroked lines);
 // the script fails loudly on anything else instead of guessing.
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -10,7 +10,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
-const icons = join(root, 'src-tauri', 'icons');
+const icons = join(root, 'crates', 'voicebar', 'icons');
 const SVG = join(icons, 'app-icon.svg');
 const SIZES = [16, 32, 48, 64, 128, 256, 512];
 
@@ -182,18 +182,18 @@ async function main() {
   const { readFileSync } = await import('node:fs');
   const scene = parseSvg(readFileSync(SVG, 'utf8'));
   mkdirSync(icons, { recursive: true });
-  // Tauri / Windows icon set. 128x128@2x is rendered at 256px like tauri icon.
+  // Native Windows icon set; retain the existing PNG sizes for source assets.
   const outputs = [
     ['32x32.png', 32], ['128x128.png', 128], ['128x128@2x.png', 256], ['icon.png', 512],
     ['icon_16x16.png', 16], ['icon_32x32.png', 32], ['icon_48x48.png', 48], ['icon_256x256.png', 256],
   ];
   for (const [name, size] of outputs) {
     writeFileSync(join(icons, name), encodePng(size, size, render(scene, size)));
-    console.log(`wrote src-tauri/icons/${name} (${size}px)`);
+    console.log(`wrote crates/voicebar/icons/${name} (${size}px)`);
   }
   const icoSizes = [16, 32, 48, 256];
   writeFileSync(join(icons, 'icon.ico'), encodeIco(icoSizes.map((size) => ({ size, png: encodePng(size, size, render(scene, size)) }))));
-  console.log(`wrote src-tauri/icons/icon.ico (${icoSizes.join('/')}px)`);
+  console.log(`wrote crates/voicebar/icons/icon.ico (${icoSizes.join('/')}px)`);
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {

@@ -1,64 +1,77 @@
 param(
-    [ValidateRange(0, 16384)]
-    [int]$MaxBuildCacheMiB = 512,
-    # 'portable' copies exe + WebView2Loader.dll into the project root (previous
-    # behaviour). 'installer' builds the NSIS/MSI bundles used for GitHub Releases.
-    [ValidateSet('portable', 'installer')]
-    [string]$Mode = 'installer'
+    [ValidateSet('portable', 'installer')][string]$Mode = 'installer',
+    [ValidateSet('x86_64-pc-windows-gnu', 'x86_64-pc-windows-msvc')]
+    [string]$Target = 'x86_64-pc-windows-gnu',
+    [ValidateRange(0, 16384)][int]$MaxBuildCacheMiB = 512,
+    [switch]$SkipTests
 )
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
-Set-Location -LiteralPath $projectRoot
-$node = (Get-Command node -ErrorAction SilentlyContinue).Source
-if (-not $node) { $node = 'C:\Program Files\nodejs\node.exe' }
-$cargo = (Get-Command cargo -ErrorAction SilentlyContinue).Source
-if (-not $cargo) { $cargo = Join-Path $env:USERPROFILE '.cargo\bin\cargo.exe' }
-$npm = Join-Path (Split-Path $node) 'node_modules\npm\bin\npm-cli.js'
-$npxCli = Join-Path (Split-Path $node) 'node_modules\npm\bin\npx-cli.js'
-if (-not (Test-Path -LiteralPath $node)) { throw 'Node.js 22+ is required.' }
-if (-not (Test-Path -LiteralPath $cargo)) { throw 'A Rust Windows toolchain is required.' }
-$env:Path = (Split-Path $node) + ';' + (Split-Path $cargo) + ';' + $env:Path
-if (-not (Test-Path 'node_modules')) {
-    & $node $npm ci --no-audit --no-fund
-    if ($LASTEXITCODE -ne 0) { throw 'npm ci failed' }
-}
-& $node $npm run build
-if ($LASTEXITCODE -ne 0) { throw 'Frontend build failed' }
-& $node --test tests/effects.test.mjs tests/shortcut.test.mjs
-if ($LASTEXITCODE -ne 0) { throw 'Frontend tests failed' }
-& $cargo test --manifest-path src-tauri/Cargo.toml
-if ($LASTEXITCODE -ne 0) { throw 'Rust tests failed' }
-
-if ($Mode -eq 'installer') {
-    # Same invocation CI uses, so a local dry run mirrors the GitHub Release.
-    # With TAURI_SIGNING_PRIVATE_KEY(+_PASSWORD) in the environment Tauri also
-    # writes the updater signature next to the NSIS installer.
-    & $node $npxCli tauri build --bundles nsis,msi
-    if ($LASTEXITCODE -ne 0) { throw 'Installer build failed' }
-    Get-ChildItem -LiteralPath 'target\release\bundle' -Recurse -Include '*.exe', '*.msi', '*.sig' |
-        Select-Object FullName, Length
-    $setup = Get-ChildItem -LiteralPath 'target\release\bundle\nsis' -Filter '*x64-setup.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
-    $sig = if ($setup) { "$($setup.FullName).sig" } else { '' }
-    if ($sig -and (Test-Path -LiteralPath $sig)) {
-        Write-Host ''
-        Write-Host 'Updater artifacts detected. Generate the manifest with:'
-        Write-Host ("  node scripts/make-latest-json.mjs --tag v<version> --repo MLGBJDLW/VoiceBar --bundle `"{0}`" --out latest.json" -f $setup.FullName)
-        Write-Host '  node scripts/verify-release.mjs --manifest latest.json --assets-dir <dir-with-installer> --tag v<version> --repo MLGBJDLW/VoiceBar'
-    } elseif (-not $env:TAURI_SIGNING_PRIVATE_KEY) {
-        Write-Host 'No signing key set: the installer is unsigned, so in-app updates stay disabled for this build.'
+Push-Location -LiteralPath $projectRoot
+try {
+    $cargo = (Get-Command cargo -ErrorAction Stop).Source
+    if (-not $env:GPUI_FXC_PATH -or -not (Test-Path -LiteralPath $env:GPUI_FXC_PATH)) {
+        $sdk = Join-Path "${env:ProgramFiles(x86)}" 'Windows Kits\10\bin'
+        $fxc = Get-ChildItem -Path "$sdk\*\x64\fxc.exe" -File -ErrorAction SilentlyContinue |
+            Sort-Object FullName -Descending | Select-Object -First 1
+        if (-not $fxc) { throw 'Install the Windows SDK or set GPUI_FXC_PATH to fxc.exe.' }
+        $env:GPUI_FXC_PATH = $fxc.FullName
     }
-} else {
-    & $cargo build --release --features custom-protocol --manifest-path src-tauri/Cargo.toml
-    if ($LASTEXITCODE -ne 0) { throw 'Release build failed' }
-    Copy-Item -LiteralPath 'target\release\voicebar.exe' -Destination 'VoiceBar.exe' -Force
-    # Some toolchains dynamically link the WebView2 loader. Ship it beside the exe.
-    $webviewLoader = 'target\release\WebView2Loader.dll'
-    if (Test-Path -LiteralPath $webviewLoader) {
-        Copy-Item -LiteralPath $webviewLoader -Destination 'WebView2Loader.dll' -Force
+    if (-not $SkipTests) {
+        & $cargo test --workspace --locked --target $Target
+        if ($LASTEXITCODE -ne 0) { throw 'Rust tests failed.' }
     }
-    Get-Item -LiteralPath 'VoiceBar.exe' | Select-Object FullName, Length
-}
+    & $cargo build --release --locked -p voicebar --target $Target
+    if ($LASTEXITCODE -ne 0) { throw 'Native release build failed.' }
+    $release = Join-Path $projectRoot "target\$Target\release"
+    Copy-Item -LiteralPath (Join-Path $release 'voicebar.exe') -Destination 'VoiceBar.exe' -Force
 
-# Bound retained intermediate files after a successful build.
-# The next Rust build recompiles dependencies when this removes target.
-& (Join-Path $PSScriptRoot 'clean-build-cache.ps1') -MaxCacheMiB $MaxBuildCacheMiB -CargoPath $cargo
+    $payload = Join-Path $projectRoot 'artifacts\payload'
+    if (Test-Path -LiteralPath $payload) {
+        if ((Get-Item -LiteralPath $payload -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw 'Refusing to replace a linked payload directory.'
+        }
+        Remove-Item -LiteralPath $payload -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $payload -Force | Out-Null
+    Copy-Item -LiteralPath 'VoiceBar.exe' -Destination $payload -Force
+    # Ship only compiler runtime DLLs the GNU build can require. No browser DLLs.
+    if ($Target.EndsWith('-gnu')) {
+        $gcc = (Get-Command gcc.exe -ErrorAction SilentlyContinue).Source
+        if (-not $gcc) { $gcc = (Get-Command gcc -ErrorAction SilentlyContinue).Source }
+        foreach ($name in 'libgcc_s_seh-1.dll', 'libstdc++-6.dll', 'libwinpthread-1.dll') {
+            if ($gcc) {
+                $library = (& $gcc "-print-file-name=$name").Trim()
+                if (Test-Path -LiteralPath $library -PathType Leaf) {
+                    Copy-Item -LiteralPath $library -Destination $payload -Force
+                    Copy-Item -LiteralPath $library -Destination $projectRoot -Force
+                }
+            }
+        }
+    }
+    Copy-Item -LiteralPath 'LICENSE' -Destination $payload -Force
+    $manifest = Get-Content 'crates\voicebar\Cargo.toml' -Raw -Encoding UTF8
+    $version = [regex]::Match($manifest, '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
+    if (-not $version) { throw 'Cannot read application version.' }
+    $portable = Join-Path $projectRoot "artifacts\VoiceBar_${version}_x64-portable.zip"
+    if (Test-Path -LiteralPath $portable) { Remove-Item -LiteralPath $portable }
+    Compress-Archive -Path "$payload\*" -DestinationPath $portable
+    if ($Mode -eq 'installer') {
+        $nsis = (Get-Command makensis.exe -ErrorAction SilentlyContinue).Source
+        if (-not $nsis) {
+            $candidates = @(
+                (Join-Path "${env:ProgramFiles(x86)}" 'NSIS\makensis.exe'),
+                (Join-Path $env:LOCALAPPDATA 'tauri\NSIS\makensis.exe')
+            )
+            $nsis = $candidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+        }
+        if (-not $nsis) { throw 'NSIS is required for -Mode installer. Install NSIS or use -Mode portable.' }
+        $fileVersion = ($version -split '[-+]')[0] + '.0'
+        $setup = Join-Path $projectRoot "artifacts\VoiceBar_${version}_x64-setup.exe"
+        & $nsis "/DAPP_VERSION=$version" "/DFILE_VERSION=$fileVersion" "/DPAYLOAD_DIR=$payload" "/DOUTPUT_FILE=$setup" 'installer.nsi'
+        if ($LASTEXITCODE -ne 0) { throw 'Native installer build failed.' }
+        Get-Item -LiteralPath $setup | Select-Object FullName, Length
+    }
+    Get-Item -LiteralPath 'VoiceBar.exe', $portable | Select-Object FullName, Length
+    & (Join-Path $PSScriptRoot 'clean-build-cache.ps1') -MaxCacheMiB $MaxBuildCacheMiB -CargoPath $cargo
+} finally { Pop-Location }

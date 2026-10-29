@@ -1,5 +1,7 @@
 # 连接与密钥检查记录
 
+> 历史归档：本页针对旧 Tauri/WebView 版本，旧前端与构建入口已在 2026-10-28 移除。当前 GPUI 版本请见 [原生版记录](native-verification.md)。
+
 日期：2026-10-16。Windows x64 / Rust 1.99 / Node 24.16。
 
 ## 问题与复现

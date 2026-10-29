@@ -1,10 +1,6 @@
-# release-plz configuration.
-#
-# Top level keys are only `workspace`, `package` and `changelog` (see
-# docs/release-plz.schema.json, which this file is validated against in CI).
-# Everything global goes under `workspace`; per-package overrides are a
-# `[[package]]` array. `version_group` is a package-level key: it is what keeps
-# the Cargo, package.json and tauri.conf.json versions moving together.
+# Rust workspace release configuration, validated against the vendored schema.
+# The application version lives in crates/voicebar/Cargo.toml; Cargo.lock lives
+# at the repository root. No frontend or bundler version needs synchronization.
 
 [workspace]
 allow_dirty = false
@@ -22,3 +18,7 @@ git_tag_name = "v{{ version }}"
 [[package]]
 name = "voicebar"
 version_group = "voicebar"
+
+[[package]]
+name = "voicebar-release-tools"
+release = false

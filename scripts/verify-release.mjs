@@ -13,7 +13,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from './make-latest-json.mjs';
 
-export const REQUIRED_SUFFIXES = ['x64-setup.exe', 'x64_en-US.msi'];
+export const REQUIRED_SUFFIXES = ['x64-setup.exe'];
 export const TARGET = 'windows-x86_64';
 
 /**

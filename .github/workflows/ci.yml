@@ -22,130 +22,97 @@ env:
 
 jobs:
   quality:
-    name: 前端与公共配置检查（ubuntu）
+    name: 发布脚本与 workspace 配置
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
           node-version: 24
-          cache: npm
-      - name: 安装前端依赖
-        run: npm ci --no-audit --no-fund
-      - name: 类型检查与前端构建
-        run: npm run build
-      - name: 前端测试（声浪渲染 + 快捷键录制）
-        run: npm run test:frontend
-      - name: 校验版本与发布元数据
-        # release-plz only bumps the Rust crate; the installers read the version
-        # from tauri.conf.json, so the frontend metadata must stay in step.
-        run: |
-          node -e '
-            const fs = require("node:fs");
-            const read = (p) => JSON.parse(fs.readFileSync(p, "utf8"));
-            const cargo = fs.readFileSync("src-tauri/Cargo.toml", "utf8");
-            const conf = read("src-tauri/tauri.conf.json");
-            const pkg = read("package.json");
-            const errors = [];
-            const version = /^version = "([^"]+)"/m.exec(cargo)?.[1];
-            if (!version) errors.push("src-tauri/Cargo.toml has no [package] version");
-            if (conf.version !== version) errors.push(`tauri.conf.json ${conf.version} != Cargo ${version}`);
-            if (pkg.version !== version) errors.push(`package.json ${pkg.version} != Cargo ${version}`);
-            if (pkg.name !== "voicebar") errors.push("package.json name must stay voicebar (release-plz renames the binary)");
-            if (conf.identifier !== "studio.voicebar.desktop") errors.push("tauri identifier changed unexpectedly");
-            if (conf.productName !== "VoiceBar") errors.push("productName drives installer file names");
-            if (!(conf.bundle.icon || []).length) errors.push("bundle.icon is empty");
-            if (errors.length) { console.error(errors.join("\n")); process.exit(1); }
-            console.log(`version ${version} consistent across Cargo, package.json and tauri.conf.json`);
-          '
-      - name: 校验 release-plz 配置
-        # TOML that parses is not enough: release-plz rejects unknown keys with a
-        # bare "invalid config file" after the run has already started. Check the
-        # shape against the vendored schema so a bad key fails here instead.
-        # Only these three tables are legal at the top level; `$schema` and any
-        # other metadata key is rejected, so none of them is allowed below.
+      - name: 发布清单测试（无 npm 依赖）
+        run: node --test tests/update-manifest.test.mjs
+      - name: 校验 Cargo 与 release-plz 配置
         shell: python
         run: |
-          import json, tomllib
+          import json, pathlib, tomllib
+
+          root = pathlib.Path(".")
+          with open("Cargo.toml", "rb") as f:
+              workspace = tomllib.load(f)["workspace"]
+          with open("crates/voicebar/Cargo.toml", "rb") as f:
+              cargo = tomllib.load(f)["package"]
           with open("release-plz.toml", "rb") as f:
               cfg = tomllib.load(f)
           with open("docs/release-plz.schema.json", "rb") as f:
               schema = json.load(f)
-          with open("src-tauri/Cargo.toml", "rb") as f:
-              cargo = tomllib.load(f)["package"]
           with open(".release-plz/changelog.toml", "rb") as f:
               tomllib.load(f)
 
+          assert "crates/voicebar" in workspace["members"], "native crate missing from workspace"
+          assert cargo["name"] == "voicebar"
+          assert cargo["version"], "Cargo package version is required"
+          assert not set(cfg) - {"workspace", "package", "changelog"}, "unknown release-plz tables"
           defs = schema["$defs"]
-          allowed = {"workspace", "package", "changelog"}
-          unknown = set(cfg) - allowed
-          assert not unknown, f"release-plz.toml: unknown top-level keys {sorted(unknown)}"
-
-          workspace = cfg["workspace"]
-          w_known = set(defs["Workspace"]["properties"])
-          w_unknown = set(workspace) - w_known
-          assert not w_unknown, f"[workspace]: unknown keys {sorted(w_unknown)}"
-
-          p_known = set(defs["PackageSpecificConfigWithName"]["properties"])
+          assert not set(cfg["workspace"]) - set(defs["Workspace"]["properties"]), "unknown workspace keys"
+          known = set(defs["PackageSpecificConfigWithName"]["properties"])
+          packages = {}
           for entry in cfg["package"]:
-              p_unknown = set(entry) - p_known
-              assert not p_unknown, f"[[package]]: unknown keys {sorted(p_unknown)}"
-              assert entry["name"] == "voicebar", entry["name"]
-              assert entry["version_group"] == "voicebar", entry["version_group"]
+              assert not set(entry) - known, f"unknown package keys: {entry}"
+              assert entry["name"] not in packages, "duplicate release-plz package"
+              packages[entry["name"]] = entry
+          assert packages["voicebar"]["version_group"] == "voicebar"
+          assert packages["voicebar-release-tools"]["release"] is False
+          assert cfg["workspace"]["publish"] is False, "crates.io publication must stay disabled"
+          assert cfg["workspace"]["git_tag_name"] == "v{{ version }}"
+          assert "v{{ version }}" in cfg["workspace"]["git_release_name"]
+          assert cfg["workspace"]["git_release_draft"] is True
 
-          assert workspace["publish"] is False, "publishing to crates.io must stay disabled"
-          assert workspace["git_tag_name"] == "v{{ version }}", workspace["git_tag_name"]
-          assert "v{{ version }}" in workspace["git_release_name"], workspace["git_release_name"]
-          assert cargo["name"] == "voicebar", "binary name must stay voicebar"
-          print(f"release-plz ok: {cargo['name']} {cargo['version']} -> {workspace['git_release_name']}")
-      - name: 校验只有一个 Cargo.lock
-        # Cargo.toml at the repo root is the workspace root, so Cargo only reads
-        # ./Cargo.lock. A second lock under src-tauri/ is stale by construction:
-        # it already drifted once and lacked tauri-plugin-updater.
+          locks = sorted(str(p).replace("\\", "/") for p in root.glob("crates/**/Cargo.lock"))
+          assert not locks, f"member lockfiles are ignored by Cargo: {locks}"
+          assert root.joinpath("Cargo.lock").stat().st_size > 0, "root Cargo.lock is missing or empty"
+          print(f"native workspace: {cargo['name']} {cargo['version']}; release configuration OK")
+      - name: 校验只有根目录 Cargo.lock 被跟踪
+        shell: bash
         run: |
-          set -eu
+          set -euo pipefail
           tracked=$(git ls-files -- 'Cargo.lock' '*/Cargo.lock')
-          test "$tracked" = "Cargo.lock" || { echo "::error::expect exactly one tracked Cargo.lock at the repo root, found: ${tracked:-none}"; exit 1; }
-          test ! -e src-tauri/Cargo.lock || { echo "::error::src-tauri/Cargo.lock exists; Cargo ignores it (workspace root is the repo root) — delete it"; exit 1; }
-          test -s Cargo.lock || { echo "::error::root Cargo.lock is empty"; exit 1; }
-          grep -q '^name = "tauri-plugin-updater"' Cargo.lock || { echo "::error::root Cargo.lock is missing tauri-plugin-updater; run cargo check"; exit 1; }
-          echo "single root Cargo.lock OK ($(git ls-files -- Cargo.lock | wc -l) tracked)"
+          test "$tracked" = "Cargo.lock" || { echo "::error::expect one tracked root Cargo.lock, found: ${tracked:-none}"; exit 1; }
 
   rust:
-    name: Rust 测试与 release 构建（windows）
+    name: Rust 原生测试与构建（Windows MSVC）
     runs-on: windows-latest
-    timeout-minutes: 40
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_TARGET: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 24
-          cache: npm
       - uses: dtolnay/rust-toolchain@stable
         with:
+          targets: x86_64-pc-windows-msvc
           components: rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri -> target
-      - name: 安装前端依赖
-        run: npm ci --no-audit --no-fund
-      - name: 前端构建（embedded assets 是 release 构建的前置）
-        run: npm run build
-      - name: Rust 格式检查
-        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
-      - name: Rust 测试
-        run: cargo test --manifest-path src-tauri/Cargo.toml
-      - name: 生产构建（custom-protocol）
-        run: cargo build --release --features custom-protocol --manifest-path src-tauri/Cargo.toml
-      - name: 记录产物体积
-        # `cargo build` only produces the exe: WebView2Loader.dll is copied next
-        # to it by the bundler, so listing it as required failed after a green
-        # build. Report whatever exists and fail only if the exe is missing.
+          workspaces: ". -> target"
+          key: windows-msvc
+      - name: 定位 Windows SDK shader 编译器
         shell: pwsh
         run: |
-          $exe = 'target/release/voicebar.exe'
-          if (-not (Test-Path $exe)) { throw "missing $exe" }
-          Get-ChildItem 'target/release' -File |
-            Where-Object { $_.Name -in @('voicebar.exe', 'WebView2Loader.dll') } |
-            Select-Object Name, Length | Format-Table | Out-String | Write-Host
+          $ErrorActionPreference = 'Stop'
+          $fxc = Get-ChildItem "${env:ProgramFiles(x86)}/Windows Kits/10/bin" -Filter fxc.exe -Recurse |
+            Where-Object FullName -Match '[\\/]x64[\\/]fxc\.exe$' |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $fxc) { throw 'Windows SDK fxc.exe was not found' }
+          "GPUI_FXC_PATH=$($fxc.FullName)" >> $env:GITHUB_ENV
+      - name: Rust 格式检查
+        run: cargo fmt --all -- --check
+      - name: Rust workspace 测试
+        run: cargo test --workspace --locked --target x86_64-pc-windows-msvc
+      - name: 原生便携版生产构建
+        shell: pwsh
+        run: ./scripts/build.ps1 -Mode portable -Target x86_64-pc-windows-msvc
+      - name: 记录产物体积
+        shell: pwsh
+        run: |
+          if (-not (Test-Path 'VoiceBar.exe')) { throw 'missing VoiceBar.exe' }
+          Get-Item 'VoiceBar.exe' | Select-Object Name, Length | Format-Table

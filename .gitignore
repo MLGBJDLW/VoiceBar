@@ -1,23 +1,16 @@
-# Tauri / Rust (build output lives at the workspace root, target/ and dist/)
+# Project-local Rust outputs and release deliverables.
 target/
-src-tauri/target/
-src-tauri/gen/schemas/
-# Cargo reads the workspace lock at the repo root (Cargo.toml is the workspace
-# root since the release-plz migration). A second lock under src-tauri would be
-# stale and ignored; refuse it outright.
-/src-tauri/Cargo.lock
-node_modules/
-dist/
+artifacts/
 .nexa/
+VoiceBar.exe
+*.dll
+
+# Local credentials.
 .env
 *.key
 *.pfx
 
-# Delivery files in the project root are build outputs, not sources.
-/VoiceBar.exe
-/WebView2Loader.dll
-
-# OS / editor noise
+# OS / editor noise.
 .DS_Store
 Thumbs.db
 .vscode/
