@@ -24,7 +24,20 @@ try {
     & $cargo build --release --locked -p voicebar --target $Target
     if ($LASTEXITCODE -ne 0) { throw 'Native release build failed.' }
     $release = Join-Path $projectRoot "target\$Target\release"
-    Copy-Item -LiteralPath (Join-Path $release 'voicebar.exe') -Destination 'VoiceBar.exe' -Force
+    # gpui-component enables GPUI's own RT_MANIFEST #1. Our .rc embeds only
+    # icons so MSVC does not receive two resources with the same identity.
+    # Replace that single linked manifest with the application's complete one.
+    $manifestTool = Join-Path (Split-Path -Parent $env:GPUI_FXC_PATH) 'mt.exe'
+    if (-not (Test-Path -LiteralPath $manifestTool -PathType Leaf)) {
+        throw 'The Windows SDK mt.exe must be next to GPUI_FXC_PATH.'
+    }
+    $appManifest = Join-Path $projectRoot 'crates\voicebar\resources\voicebar.manifest'
+    & $manifestTool -nologo -manifest $appManifest -validate_manifest
+    if ($LASTEXITCODE -ne 0) { throw 'Application manifest validation failed.' }
+    $nativeExe = Join-Path $release 'voicebar.exe'
+    & $manifestTool -nologo -manifest $appManifest "-outputresource:$nativeExe;#1"
+    if ($LASTEXITCODE -ne 0) { throw 'Embedding the final application manifest failed.' }
+    Copy-Item -LiteralPath $nativeExe -Destination 'VoiceBar.exe' -Force
 
     $payload = Join-Path $projectRoot 'artifacts\payload'
     if (Test-Path -LiteralPath $payload) {
