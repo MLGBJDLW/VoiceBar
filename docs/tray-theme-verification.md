@@ -30,10 +30,12 @@
 
 | 文件 | 字节 | SHA-256 |
 |---|---:|---|
-| VoiceBar.exe | 14938624 | 5f3e7745f1d42e1af2e563a472a3f8199e53b26138f39ab48fb4c221fd6d03ba |
-| artifacts/VoiceBar_0.2.0_x64-setup.exe | 4411651 | 7c9e588baa5c16b31850af8ab6c1d3eb2a40bdbc45d30f12c01900434f22846d |
-| artifacts/VoiceBar_0.2.0_x64-portable.zip | 6033183 | db8c5ddb146751d0acff6c590e02784730094064f65ccffcd0beb63184285f5e |
+| VoiceBar.exe | 14937088 | 05d5cd29c7189121b960687c8563d821432545551456aafbf32ea4d9f0e7f427 |
+| artifacts/VoiceBar_0.2.0_x64-setup.exe | 4410073 | 78cdd9289d518d8c7f7d8b20f16c8397b3fa5a6edde6a7a416e615df84f63e81 |
+| artifacts/VoiceBar_0.2.0_x64-portable.zip | 6033034 | e2d2ab34cf1008a928a26582f682cef7d8499d97dd35012b00b497ceaccc0f36 |
 
-根目录、release、payload 与便携 ZIP 内的 EXE SHA-256 一致，ZIP 只含 LICENSE 和 VoiceBar.exe。以上为本地 GNU 产物；GitHub Actions 将使用 MSVC 构建正式 Release，字节与哈希不应混为一谈。
+根目录、release、payload 与便携 ZIP 内的 EXE SHA-256 一致，ZIP 只含 LICENSE 和 VoiceBar.exe。以上为本地 GNU 产物；GitHub Actions 使用 MSVC 构建正式 Release，字节与哈希不应混为一谈。
+
+首次远端 MSVC 构建因应用与 GPUI 的重复 Manifest 发生 CVT1100 / LNK1123，未发布。修复后应用资源只在链接期嵌入图标，打包时用 Windows SDK mt.exe 校验并写入应用完整清单。本地重跑 83 项回归和单独菜单夹具通过；重打包成功。最终 EXE 的 PE 资源枚举确认仅有一个 RT_MANIFEST（ID 1，语言 1033），包含应用身份；mt.exe 提取后再次校验成功。
 
 GitHub 发布及缓存清理的最终结果见本版本发布记录。

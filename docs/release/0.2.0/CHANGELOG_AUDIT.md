@@ -25,6 +25,7 @@
 | 更新与联网默认值 | 保留并迁移实现 | 旧版和当前版 update_check 默认 auto；原生 updater.rs 固定读取 GitHub latest.json 并校验 minisign / SHA-256。未声称完全离线或真实安装版升级已实测。 |
 | 命令行控制 | 当前兼容性缺口 | 当前 main.rs 只解析 --hidden；全源码无 --toggle / --cancel 实现。已纠正 README 和发布说明，未把旧版宏控制误写为原生版已支持。 |
 | Windows 发行包 | 打包方式改变 | 当前 scripts/build.ps1 / installer.nsi 生成 x64 NSIS 与便携 ZIP，不生成旧 MSI。签名仅用于应用更新校验，不等同于 Authenticode 发布者签名。 |
+| Windows 清单资源 | 发布阻断修复 | 首次 MSVC CI / Release 因重复 RT_MANIFEST #1 出现 CVT1100 / LNK1123；gpui-component 间接启用 GPUI 默认清单。应用 .rc 改为仅图标，打包时用 Windows SDK mt.exe 校验并替换唯一清单；未把失败的首次工作流写成通过。 |
 
 ## 验证口径
 
