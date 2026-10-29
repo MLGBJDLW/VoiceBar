@@ -122,7 +122,7 @@ where
     let mut failed = false;
     device
         .build_input_stream(
-            config,
+            *config,
             move |data: &[T], _| {
                 if failed {
                     return;
