@@ -213,7 +213,6 @@ enum Job {
     Connection(Result<String, String>),
     Update(Result<updater::UpdateInfo, String>),
     Installed(Result<(), String>),
-    Microphones(Result<Vec<String>, String>),
 }
 pub struct Settings {
     runtime: Arc<Runtime>,
@@ -228,6 +227,9 @@ pub struct Settings {
     message: String,
     job: Option<mpsc::Receiver<Job>>,
     microphones: Vec<String>,
+    microphone_scan: Option<mpsc::Receiver<Result<Vec<String>, String>>>,
+    microphone_test: Option<crate::audio::MicrophoneTest>,
+    microphone_message: String,
     update: Option<updater::UpdateInfo>,
     demo_until: Option<Instant>,
     voice: VoiceMotion,
@@ -269,6 +271,10 @@ impl Settings {
                 cx.subscribe(&input, move |this, _, event: &InputEvent, cx| {
                     if matches!(event, InputEvent::Change) {
                         this.dirty = true;
+                        if path == "micDevice" {
+                            this.microphone_test = None;
+                            this.microphone_message.clear();
+                        }
                         if path.starts_with("appearance.")
                             && this.runtime.overlay_preview().is_some()
                         {
@@ -282,10 +288,6 @@ impl Settings {
             );
             inputs.insert(path, input);
         }
-        let (tx, rx) = mpsc::channel();
-        runtime.executor.spawn_blocking(move || {
-            let _ = tx.send(Job::Microphones(crate::audio::devices()));
-        });
         let mut settings = Self {
             runtime,
             desktop,
@@ -297,14 +299,18 @@ impl Settings {
             tab: 0,
             dirty: false,
             message: "设置会在保存后生效。关闭窗口后继续在托盘待命。".into(),
-            job: Some(rx),
+            job: None,
             microphones: vec![],
+            microphone_scan: None,
+            microphone_test: None,
+            microphone_message: String::new(),
             update: None,
             demo_until: None,
             voice: VoiceMotion::default(),
             last_snapshot: String::new(),
         };
         settings.subscribe_shortcuts(window, cx);
+        settings.refresh_microphones();
         settings
     }
     fn value(&self, path: &str, cx: &App) -> String {
@@ -503,6 +509,37 @@ impl Settings {
         cx.notify();
     }
 
+    fn refresh_microphones(&mut self) {
+        if self.microphone_scan.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        self.microphone_scan = Some(rx);
+        self.runtime.executor.spawn_blocking(move || {
+            let _ = tx.send(crate::audio::devices());
+        });
+    }
+
+    fn stop_microphone_test(&mut self) {
+        if self.microphone_test.take().is_some() {
+            self.microphone_message = "麦克风测试已停止。".into();
+        }
+    }
+
+    fn toggle_microphone_test(&mut self, cx: &mut Context<Self>) {
+        if self.microphone_test.is_some() {
+            self.stop_microphone_test();
+        } else {
+            let device = self.value("micDevice", cx);
+            self.microphone_test = Some(crate::audio::MicrophoneTest::start(
+                self.runtime.clone(),
+                device,
+            ));
+            self.microphone_message = "请说几句话，测试将在 6 秒后结束。".into();
+        }
+        cx.notify();
+    }
+
     fn test_connection(&mut self, cx: &mut Context<Self>) {
         if self.job.is_some() {
             self.message = "请等待当前操作完成。".into();
@@ -552,14 +589,29 @@ impl Settings {
     }
     fn tick(&mut self, cx: &mut Context<Self>) {
         self.poll_shortcut(cx);
+        if let Some(result) = self
+            .microphone_scan
+            .as_ref()
+            .and_then(|rx| rx.try_recv().ok())
+        {
+            self.microphone_scan = None;
+            match result {
+                Ok(mics) => self.microphones = mics,
+                Err(error) => self.microphone_message = format!("无法获取设备列表：{error}"),
+            }
+            cx.notify();
+        }
+        if let Some(test) = &self.microphone_test {
+            if let Some(result) = test.result() {
+                self.microphone_test = None;
+                self.microphone_message = result;
+            }
+            cx.notify();
+        }
         if let Some(result) = self.job.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.job = None;
             match result {
                 Job::Connection(result) => self.message = result.unwrap_or_else(|e| e),
-                Job::Microphones(result) => match result {
-                    Ok(mics) => self.microphones = mics,
-                    Err(e) => self.message = e,
-                },
                 Job::Update(result) => match result {
                     Ok(info) => {
                         self.message = if info.available {
@@ -659,85 +711,319 @@ impl Settings {
         };
         let can_install =
             self.update.as_ref().is_some_and(|u| u.available) && updater::can_self_update();
-        column().gap_5()
+        column()
+            .gap_5()
             .child(
-                card().p_6().gap_5().bg(rgb(0x1b2729)).border_color(rgb(0x344b47))
-                    .child(row().justify_between()
-                        .child(eyebrow("VOICE TO WORDS").text_color(rgb(0x9bb8af)))
-                        .child(badge(state_label(&status.state), state_color(&status.state))))
-                    .child(row().items_center().gap_6()
-                        .child(column().flex_1().gap_4()
-                            .child(div().text_size(px(if wide { 30. } else { 25. })).line_height(px(39.))
-                                .font_weight(FontWeight::SEMIBOLD).child("少一点打字，多一点表达。"))
-                            .child(note("在任意输入框按下快捷键，让思绪自然成文。").text_color(rgb(0xafc4bf)))
-                            .child(keycaps(&saved.hotkey))
-                            .child(row().flex_wrap().gap_2()
-                                .child(primary("record", if active { "结束录音" } else { "测试录音" })
-                                    .child(icon(if active { Glyph::Stop } else { Glyph::Mic }, 0x10251d, 15.))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        if this.runtime.active.lock().unwrap().is_some() { this.runtime.stop(false); }
-                                        else if let Err(error) = this.runtime.start() { this.message = error; }
-                                        cx.notify();
-                                    })))
-                                .child(button("input-guide", "配置快捷键")
-                                    .bg(rgba(0xffffff08)).on_click(cx.listener(|this, _, _, cx| {
-                                        this.tab = 3; cx.notify();
-                                    })))))
-                        .when(wide, |r| r.child(
-                            column().w(px(210.)).h(px(142.)).justify_center().items_center().gap_3()
-                                .rounded(px(16.)).bg(rgba(0x101d2080))
-                                .child(waveform(self.appearance(cx), visual).w(px(180.)).h(px(70.)))
-                                .child(note("让声音看得见").text_color(rgb(0x8cad9f)))
-                        )))
-                    .child(note("测试录音仅在设置中预览；向其他应用写入时，先聚焦输入框，再使用快捷键。")
-                        .text_size(px(11.)).text_color(rgb(0x9bb1aa)))
+                card()
+                    .p_6()
+                    .gap_5()
+                    .bg(rgb(0x1b2729))
+                    .border_color(rgb(0x344b47))
+                    .child(
+                        row()
+                            .justify_between()
+                            .child(note(provider).text_color(rgb(0x9bb8af)))
+                            .child(badge(
+                                state_label(&status.state),
+                                state_color(&status.state),
+                            )),
+                    )
+                    .child(
+                        row()
+                            .items_center()
+                            .gap_6()
+                            .child(
+                                column()
+                                    .flex_1()
+                                    .gap_4()
+                                    .child(
+                                        div()
+                                            .text_size(px(if wide { 30. } else { 25. }))
+                                            .line_height(px(39.))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child(if saved.hold_to_talk {
+                                                "按住说话，松开结束"
+                                            } else {
+                                                "按一下开始，再按一下结束"
+                                            }),
+                                    )
+                                    .child(
+                                        note("先点选输入位置，再使用录音快捷键。")
+                                            .text_color(rgb(0xafc4bf)),
+                                    )
+                                    .child(keycaps(&saved.hotkey))
+                                    .child(
+                                        row()
+                                            .flex_wrap()
+                                            .gap_2()
+                                            .child(
+                                                primary(
+                                                    "record",
+                                                    if active {
+                                                        "结束录音"
+                                                    } else {
+                                                        "试用语音识别"
+                                                    },
+                                                )
+                                                .child(icon(
+                                                    if active { Glyph::Stop } else { Glyph::Mic },
+                                                    0x10251d,
+                                                    15.,
+                                                ))
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    if this.runtime.active.lock().unwrap().is_some()
+                                                    {
+                                                        this.runtime.stop(false);
+                                                    } else if let Err(error) = this.runtime.start()
+                                                    {
+                                                        this.message = error;
+                                                    }
+                                                    cx.notify();
+                                                })),
+                                            )
+                                            .child(
+                                                button("engine-guide", "配置识别服务")
+                                                    .bg(rgba(0xffffff08))
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.tab = 2;
+                                                        cx.notify();
+                                                    })),
+                                            ),
+                                    ),
+                            )
+                            .when(wide, |r| {
+                                r.child(
+                                    column()
+                                        .w(px(210.))
+                                        .h(px(142.))
+                                        .justify_center()
+                                        .items_center()
+                                        .gap_3()
+                                        .rounded(px(16.))
+                                        .bg(rgba(0x101d2080))
+                                        .child(
+                                            waveform(self.appearance(cx), visual)
+                                                .w(px(180.))
+                                                .h(px(70.)),
+                                        ),
+                                )
+                            }),
+                    )
+                    .child(
+                        note("试用时，录音会发往已配置的识别服务，文字显示在下方。")
+                            .text_size(px(11.))
+                            .text_color(rgb(0x9bb1aa)),
+                    ),
             )
             .child(
-                row().gap_3().children([
-                    (Glyph::Engine, "识别服务", provider.to_string(), 2),
-                    (Glyph::Keyboard, "输入方式", mode.to_string(), 3),
-                    (Glyph::Wave, "浮框外观", match saved.appearance.effect.as_str() {
-                        "spectrum" => "声纹频带", "orbit" => "涟漪轨道", "bars" => "节奏音柱", _ => "流动丝带",
-                    }.to_string(), 1),
-                ].into_iter().enumerate().map(|(i, (glyph, label, value, tab))| {
-                    card().id(("quick-setting", i)).flex_1().min_w_0().p_4().gap_3()
-                        .cursor_pointer().hover(|s| s.bg(rgb(0x202630)).border_color(rgb(0x3b4754)))
-                        .child(row().gap_2().child(icon(glyph, MUTED, 16.)).child(note(label)))
-                        .child(row().justify_between().gap_1()
-                            .child(div().flex_1().min_w_0().text_ellipsis().text_size(px(13.))
-                                .font_weight(FontWeight::MEDIUM).child(value))
-                            .child(icon(Glyph::Arrow, MUTED, 13.)))
-                        .on_click(cx.listener(move |this, _, _, cx| { this.tab = tab; cx.notify(); }))
-                }))
-            )
-            .child(
-                card().gap_4()
-                    .child(row().justify_between()
-                        .child(row().gap_2().child(icon(Glyph::Spark, MINT, 17.))
-                            .child(title("本次识别")).when(transcript.corrected, |r| r.child(badge("已校对", MINT))))
-                        .child(button("copy-result", "复制文字").child(icon(Glyph::Copy, MUTED, 14.))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.message = this.runtime.copy_transcript().map(|_| "已复制。".into()).unwrap_or_else(|e| e);
+                row().gap_3().children(
+                    [
+                        (Glyph::Engine, "识别服务", provider.to_string(), 2),
+                        (Glyph::Keyboard, "输入方式", mode.to_string(), 3),
+                        (
+                            Glyph::Wave,
+                            "浮框外观",
+                            match saved.appearance.effect.as_str() {
+                                "spectrum" => "声纹频带",
+                                "orbit" => "涟漪轨道",
+                                "bars" => "节奏音柱",
+                                _ => "流动丝带",
+                            }
+                            .to_string(),
+                            1,
+                        ),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, (glyph, label, value, tab))| {
+                        card()
+                            .id(("quick-setting", i))
+                            .flex_1()
+                            .min_w_0()
+                            .p_4()
+                            .gap_3()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(0x202630)).border_color(rgb(0x3b4754)))
+                            .child(
+                                row()
+                                    .gap_2()
+                                    .child(icon(glyph, MUTED, 16.))
+                                    .child(note(label)),
+                            )
+                            .child(
+                                row()
+                                    .justify_between()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .text_ellipsis()
+                                            .text_size(px(13.))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .child(value),
+                                    )
+                                    .child(icon(Glyph::Arrow, MUTED, 13.)),
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.tab = tab;
                                 cx.notify();
-                            }))))
-                    .child(div().id("transcript").min_h(px(94.)).max_h(px(220.)).w_full().min_w_0()
-                        .p_4().rounded(px(10.)).bg(rgb(INSET)).overflow_y_scroll()
-                        .text_size(px(14.)).line_height(px(25.))
-                        .when(text.is_empty(), |s| s.text_color(rgb(MUTED)))
-                        .child(if text.is_empty() { "从一句话开始。\n识别的文字会在这里呈现，随时可以复制。".to_string() } else { text }))
-                    .child(note(status.message))
+                            }))
+                    }),
+                ),
             )
             .child(
-                card().gap_3()
-                    .child(row().justify_between()
-                        .child(column().gap_1().child(title("保持最新")).child(note(format!("VoiceBar {} · Windows", env!("CARGO_PKG_VERSION")))))
-                        .child(button("check-update", if self.job.is_some() { "操作进行中…" } else { "检查更新" })
-                            .on_click(cx.listener(|this, _, _, cx| this.check_update(cx))))
-                        .when(can_install, |r| r.child(primary("install-update", "下载并安装")
-                            .on_click(cx.listener(|this, _, _, cx| this.install_update(cx))))))
-                    .child(self.choices("updateCheck", &[("auto", "自动检查"), ("manual", "手动检查"), ("off", "关闭检查")], cx))
-                    .when(!updater::can_self_update(), |c| c.child(note("便携版可从 GitHub Releases 下载新版本。")))
+                card()
+                    .gap_4()
+                    .child(
+                        row()
+                            .justify_between()
+                            .child(
+                                row()
+                                    .gap_2()
+                                    .child(icon(Glyph::Spark, MINT, 17.))
+                                    .child(title("本次识别"))
+                                    .when(transcript.corrected, |r| r.child(badge("已校对", MINT))),
+                            )
+                            .when(!text.is_empty(), |r| {
+                                r.child(
+                                    button("copy-result", "复制文字")
+                                        .child(icon(Glyph::Copy, MUTED, 14.))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.message = this
+                                                .runtime
+                                                .copy_transcript()
+                                                .map(|_| "已复制。".into())
+                                                .unwrap_or_else(|e| e);
+                                            cx.notify();
+                                        })),
+                                )
+                            }),
+                    )
+                    .child(
+                        div()
+                            .id("transcript")
+                            .min_h(px(94.))
+                            .max_h(px(220.))
+                            .w_full()
+                            .min_w_0()
+                            .p_4()
+                            .rounded(px(10.))
+                            .bg(rgb(INSET))
+                            .overflow_y_scroll()
+                            .text_size(px(14.))
+                            .line_height(px(25.))
+                            .when(text.is_empty(), |s| s.text_color(rgb(MUTED)))
+                            .child(if text.is_empty() {
+                                "等待识别文字…".to_string()
+                            } else {
+                                text
+                            }),
+                    )
+                    .child(note(status.message)),
             )
+            .child(self.recent_panel(saved.history_enabled, cx))
+            .child(
+                card()
+                    .gap_3()
+                    .child(
+                        row()
+                            .justify_between()
+                            .child(
+                                column()
+                                    .gap_1()
+                                    .child(title("保持最新"))
+                                    .child(note(format!(
+                                        "VoiceBar {} · Windows",
+                                        env!("CARGO_PKG_VERSION")
+                                    ))),
+                            )
+                            .child(
+                                button(
+                                    "check-update",
+                                    if self.job.is_some() {
+                                        "操作进行中…"
+                                    } else {
+                                        "检查更新"
+                                    },
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| this.check_update(cx))),
+                            )
+                            .when(can_install, |r| {
+                                r.child(primary("install-update", "下载并安装").on_click(
+                                    cx.listener(|this, _, _, cx| this.install_update(cx)),
+                                ))
+                            }),
+                    )
+                    .child(self.choices(
+                        "updateCheck",
+                        &[
+                            ("auto", "自动检查"),
+                            ("manual", "手动检查"),
+                            ("off", "关闭检查"),
+                        ],
+                        cx,
+                    ))
+                    .when(!updater::can_self_update(), |c| {
+                        c.child(note("便携版可从 GitHub Releases 下载新版本。"))
+                    }),
+            )
+    }
+    fn recent_panel(&self, enabled: bool, cx: &Context<Self>) -> Div {
+        let recent = self.runtime.recent_results();
+        card()
+            .gap_3()
+            .child(self.toggle(
+                "historyEnabled",
+                "最近识别",
+                "开启并保存后，可取回本次运行最近 5 条文字。关闭并保存或退出应用会清空列表。",
+                cx,
+            ))
+            .when(enabled && recent.is_empty(), |c| {
+                c.child(note("还没有记录。下次听写结束后会出现在这里。"))
+            })
+            .when(!recent.is_empty(), |c| {
+                c.child(
+                    row()
+                        .justify_between()
+                        .child(note("最近完成的听写排在最前"))
+                        .child(button("clear-recent", "清空列表").on_click(cx.listener(
+                            |this, _, _, cx| {
+                                this.runtime.clear_recent();
+                                cx.notify();
+                            },
+                        ))),
+                )
+                .children(recent.into_iter().map(|item| {
+                    let id = item.id;
+                    row()
+                        .gap_3()
+                        .p_2()
+                        .rounded(px(8.))
+                        .bg(rgb(INSET))
+                        .child(
+                            column()
+                                .min_w_0()
+                                .flex_1()
+                                .gap_1()
+                                .child(note(item.label).text_size(px(11.)))
+                                .child(
+                                    div().text_ellipsis().text_size(px(14.)).child(item.preview),
+                                ),
+                        )
+                        .child(
+                            button(SharedString::from(format!("copy-recent-{id}")), "复制")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.message = this
+                                        .runtime
+                                        .copy_recent(id)
+                                        .map(|_| "已复制完整文字。".into())
+                                        .unwrap_or_else(|e| e);
+                                    cx.notify();
+                                })),
+                        )
+                }))
+            })
     }
     fn appearance_panel(&self, cx: &Context<Self>) -> Div {
         let appearance = self.appearance(cx);
@@ -1034,7 +1320,7 @@ impl Settings {
             .gap_5()
             .child(
                 card()
-                    .child(title("声音，由谁来理解"))
+                    .child(title("识别服务"))
                     .child(provider_choices)
                     .child(note(if self.draft.provider.is_batch() {
                         "录完后转写。边说边写需要选择流式识别服务。"
@@ -1059,7 +1345,12 @@ impl Settings {
                             )
                             .child(note("测试当前表单，不录音、不保存。")),
                     )
-                    .child(self.field("hotwords")),
+                    .map(|card| match selected.as_str() {
+                        "funasr" | "openai-realtime" | "openai-compatible" | "whispercpp" => {
+                            card.child(self.field("hotwords"))
+                        }
+                        _ => card.child(note("VoiceBar 的当前协议适配器不会发送热词提示。")),
+                    }),
             )
             .child(
                 card()
@@ -1076,21 +1367,101 @@ impl Settings {
                     }),
             )
     }
+    fn microphone_controls(&self, cx: &Context<Self>) -> Div {
+        let selected = self.value("micDevice", cx);
+        let select_button = |id: ElementId, label: String, name: String| {
+            button(id, label)
+                .when(selected == name, |b| b.bg(rgb(TINT)).text_color(rgb(MINT)))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.set_field("micDevice", &name, window, cx)
+                }))
+        };
+        column()
+            .child(self.field("micDevice"))
+            .child(
+                row()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(select_button(
+                        "mic-default".into(),
+                        "系统默认".into(),
+                        String::new(),
+                    ))
+                    .children(self.microphones.iter().enumerate().map(|(i, name)| {
+                        select_button(("mic", i).into(), name.clone(), name.clone())
+                    })),
+            )
+            .child(
+                row()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(
+                        button(
+                            "mic-test",
+                            if self.microphone_test.is_some() {
+                                "结束测试"
+                            } else {
+                                "测试麦克风"
+                            },
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_microphone_test(cx))),
+                    )
+                    .child(
+                        button(
+                            "mic-refresh",
+                            if self.microphone_scan.is_some() {
+                                "正在刷新…"
+                            } else {
+                                "刷新设备"
+                            },
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.refresh_microphones();
+                            cx.notify();
+                        })),
+                    ),
+            )
+            .when_some(self.microphone_test.as_ref(), |panel, test| {
+                let level = test.level();
+                panel.child(
+                    row()
+                        .gap_3()
+                        .child(note("输入电平"))
+                        .child(
+                            div().flex_1().h(px(7.)).rounded_full().bg(rgb(LINE)).child(
+                                div()
+                                    .w(relative(level as f32 / 100.))
+                                    .h_full()
+                                    .rounded_full()
+                                    .bg(rgb(MINT)),
+                            ),
+                        )
+                        .child(note(format!("{level}%")).w(px(36.))),
+                )
+            })
+            .child(note(
+                if self.microphone_message.is_empty() {
+                    "测试只在本机测量输入电平。"
+                } else {
+                    &self.microphone_message
+                }
+                .to_owned(),
+            ))
+    }
+
     fn input_panel(&self, cx: &Context<Self>) -> Div {
         column().gap_5()
             .child(card().child(self.shortcut_controls(cx))
-                .child(self.field("micDevice"))
-                .child(row().flex_wrap().gap_2()
-                    .child(button("mic-default","系统默认").on_click(cx.listener(|this,_,window,cx|this.set_field("micDevice","",window,cx))))
-                    .children(self.microphones.iter().enumerate().map(|(i,name)|{
-                        let name=name.clone();button(("mic",i),name.clone()).on_click(cx.listener(move|this,_,window,cx|this.set_field("micDevice",&name,window,cx)))
-                    })))
+                .child(self.toggle("holdToTalk", "按住说话", "按住录音快捷键时预览，松开后统一写入；仅预览模式可手动复制。关闭后，按一次开始，再按一次结束。托盘与设置按钮始终手动控制。", cx))
+                .child(self.microphone_controls(cx))
                 .child(self.pair("maxRecordingSecs","silenceStopSecs"))
                 .child(note("说话后安静 1–30 秒自动结束；0 关闭。嘈杂环境或长口述建议手动结束。")))
             .child(card().child(title("文字，落在光标所在"))
                 .child(self.choices("injection.mode",&[("realtime","边说边写"),("stable","确认片段逐段写入"),("final","结束后统一写入"),("preview","只预览 · 手动复制")],cx))
                 .when(self.draft.injection.mode!="realtime",|card|card.child(self.choices("injection.method",&[("unicode","Unicode 按键"),("clipboard","剪贴板粘贴")],cx)))
                 .child(note(match self.draft.injection.mode.as_str(){
+                    "realtime" if self.draft.hold_to_talk=>"按住说话时松开后统一写入。通过按钮启动时按实时模式写入，移动光标或手动编辑后可点浮框「继续」。",
+                    "stable" if self.draft.hold_to_talk=>"按住说话时松开后统一写入。通过按钮启动时逐段写入，校对结果可单独复制。",
                     "realtime"=>"实时写入固定使用 Unicode 按键，只修订本次临时文本。移动光标、切换控件或手动编辑后暂停写入；按快捷键可从当前光标继续，完整结果可复制。",
                     "stable"=>"只写入服务已确认的片段。校对结果保留为预览，不自动改写已输入的文字。",
                     "final"=>"结束后统一写入，开启校对时写入校对后的结果。",
@@ -1274,6 +1645,9 @@ impl Render for Settings {
                             )
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.cancel_shortcut(cx);
+                                if this.tab != i {
+                                    this.stop_microphone_test();
+                                }
                                 this.tab = i;
                                 cx.notify();
                             }))
@@ -1986,7 +2360,10 @@ pub fn run(runtime: Arc<Runtime>, desktop: Desktop, hidden: bool) {
                     *slot.borrow_mut() = Some(view.clone());
                     let weak = view.downgrade();
                     window.on_window_should_close(cx, move |window, cx| {
-                        let _ = weak.update(cx, |view, cx| view.cancel_shortcut(cx));
+                        let _ = weak.update(cx, |view, cx| {
+                            view.stop_microphone_test();
+                            view.cancel_shortcut(cx);
+                        });
                         desktop::hide_window(native_handle(window));
                         false
                     });

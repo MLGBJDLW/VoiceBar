@@ -12,6 +12,9 @@ use windows::Win32::UI::{
     WindowsAndMessaging::GetForegroundWindow,
 };
 
+#[path = "held_dictation_test.rs"]
+mod held_dictation_test;
+
 fn send_keys(hwnd: isize, keys: &[(u16, bool)]) -> Result<(), String> {
     if unsafe { GetForegroundWindow() }.0 as isize != hwnd {
         return Err("owned shortcut test window lost foreground; no keys sent".into());

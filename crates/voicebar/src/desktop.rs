@@ -8,6 +8,7 @@ mod menu;
 #[cfg(windows)]
 mod native {
     use super::*;
+    use crate::{platform::Shortcut, session};
     use std::{
         cell::{Cell, RefCell},
         collections::VecDeque,
@@ -763,11 +764,6 @@ mod native {
         }
     }
 
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    struct Shortcut {
-        modifiers: u32,
-        key: u32,
-    }
     #[derive(Clone, Copy)]
     struct Bindings {
         toggle: Shortcut,
@@ -1035,6 +1031,7 @@ mod native {
     }
 
     struct NativeThread {
+        held_session: Option<tokio::sync::mpsc::UnboundedSender<session::Command>>,
         runtime: Arc<Runtime>,
         // Drop resources before their owner window.
         hotkeys: Hotkeys,
@@ -1059,6 +1056,7 @@ mod native {
             Ok(Self {
                 runtime,
                 hotkeys,
+                held_session: None,
                 tray,
                 window,
             })
@@ -1078,7 +1076,7 @@ mod native {
                         NativeEvent::Action(action) => self.action(action),
                         NativeEvent::Hotkey(id, payload) => {
                             if let Some(action) = self.hotkeys.action(id, payload) {
-                                self.action(action);
+                                self.hotkey(action);
                             }
                         }
                         NativeEvent::Popup(point) => {
@@ -1168,6 +1166,53 @@ mod native {
                 _ => {}
             }
         }
+        fn hotkey(&mut self, action: usize) {
+            if action != TOGGLE || !self.runtime.config.lock().unwrap().hold_to_talk {
+                self.action(action);
+                return;
+            }
+            Self::press_to_talk(
+                &self.runtime,
+                self.hotkeys.bindings.toggle,
+                &mut self.held_session,
+            );
+        }
+        fn press_to_talk(
+            runtime: &Arc<Runtime>,
+            chord: Shortcut,
+            held_session: &mut Option<tokio::sync::mpsc::UnboundedSender<session::Command>>,
+        ) {
+            // With MOD_NOREPEAT a second keydown proves there was a release,
+            // even if a quick re-press fell between two key-state samples.
+            if let Some(previous) = held_session.take() {
+                if previous.send(session::Command::Finish).is_ok() {
+                    return;
+                }
+            }
+            if runtime.active.lock().unwrap().is_some() {
+                return;
+            }
+            let control = match runtime.start_recording(Some(chord)) {
+                Ok(control) => control,
+                Err(error) => {
+                    runtime.set_status("error", error);
+                    return;
+                }
+            };
+            *held_session = Some(control.clone());
+            // RegisterHotKey only posts presses. Watch the physical chord on
+            // the worker so opening a native menu cannot delay a release.
+            // This sender belongs exclusively to the session just started.
+            runtime.executor.spawn(async move {
+                while chord.held() {
+                    tokio::select! {
+                        _ = control.closed() => return,
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(15)) => {}
+                    }
+                }
+                let _ = control.send(session::Command::Finish);
+            });
+        }
         fn popup(&self, position: Option<Point>) -> Result<(), String> {
             struct OpenMenu<'a>(&'a MessageEvents);
             impl Drop for OpenMenu<'_> {
@@ -1201,7 +1246,7 @@ mod native {
                         active,
                         visible,
                         has_text,
-                        if self.runtime.writing_paused() {
+                        if self.runtime.writing_paused() || (active && config.hold_to_talk) {
                             ""
                         } else {
                             &config.hotkey
@@ -1294,6 +1339,47 @@ mod native {
     #[cfg(test)]
     mod tray_tests {
         use super::*;
+
+        #[test]
+        fn consecutive_hold_presses_ignore_closed_sessions_and_never_finish_a_manual_session() {
+            let mut config = AppConfig::default();
+            // New starts hit validation without opening a microphone.
+            config.hotkey.clear();
+            let runtime = Arc::new(Runtime::new(config, "unused.json".into()));
+            let chord = Shortcut {
+                modifiers: 0,
+                key: 0x77,
+            };
+            let (first, mut first_input) = tokio::sync::mpsc::unbounded_channel();
+            let mut held = Some(first.clone());
+            NativeThread::press_to_talk(&runtime, chord, &mut held);
+            assert!(matches!(
+                first_input.try_recv(),
+                Ok(session::Command::Finish)
+            ));
+            drop(first_input);
+
+            // On the next press a completed session's watcher can still hold
+            // a sender, but the new start must proceed past it.
+            held = Some(first);
+            NativeThread::press_to_talk(&runtime, chord, &mut held);
+            assert!(runtime
+                .status
+                .lock()
+                .unwrap()
+                .message
+                .contains("快捷键不能为空"));
+
+            let (manual, mut manual_input) = tokio::sync::mpsc::unbounded_channel();
+            *runtime.active.lock().unwrap() = Some(crate::runtime::Active {
+                id: 2,
+                stop: manual,
+                input: crate::runtime::InputState::Preview,
+            });
+            NativeThread::press_to_talk(&runtime, chord, &mut held);
+            assert!(manual_input.try_recv().is_err());
+            assert!(held.is_none());
+        }
 
         #[test]
         fn legacy_and_v4_callbacks_keep_icon_identity_and_signed_coordinates() {

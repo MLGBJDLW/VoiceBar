@@ -4,6 +4,7 @@ use crate::{
 };
 use serde::Serialize;
 use std::{
+    collections::VecDeque,
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -27,6 +28,16 @@ pub struct Transcript {
     pub utterance: u64,
 }
 
+const RECENT_LIMIT: usize = 5;
+
+#[derive(Clone)]
+pub struct RecentResult {
+    pub id: u64,
+    pub preview: String,
+    pub label: &'static str,
+    text: Arc<str>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Level {
     pub audio: crate::voice_visual::AudioFrame,
@@ -46,7 +57,8 @@ pub enum InputState {
     Preview,
     Writing(platform::InputTarget),
     Paused,
-    Finishing,
+    Finishing(Option<platform::InputTarget>),
+    Cancelled,
 }
 
 pub struct Active {
@@ -55,14 +67,35 @@ pub struct Active {
     pub id: u64,
 }
 
+impl Active {
+    /// Keep the last writable generation while the recognizer or corrector
+    /// finishes. Cancellation can then revoke even an in-flight Unicode write.
+    pub(crate) fn finish_input(&mut self) {
+        self.input = match self.input {
+            InputState::Writing(target) => InputState::Finishing(Some(target)),
+            InputState::Paused | InputState::Preview => InputState::Finishing(None),
+            state => state,
+        };
+    }
+
+    fn cancel_input(&mut self) {
+        if let InputState::Writing(target) | InputState::Finishing(Some(target)) = self.input {
+            target.release();
+        }
+        self.input = InputState::Cancelled;
+    }
+}
+
 /// Shared state for the native desktop and background audio/session tasks.
 /// Window operations and global shortcut registration belong to the desktop.
 pub struct Runtime {
     pub config: Mutex<AppConfig>,
     pub status: Mutex<Status>,
     pub transcript: Mutex<Transcript>,
+    recent: Mutex<VecDeque<RecentResult>>,
     pub level: Mutex<Level>,
     pub active: Mutex<Option<Active>>,
+    pub(crate) microphone_stream: Mutex<()>,
     pub overlay_visible: AtomicBool,
     overlay_preview: Mutex<Option<OverlayPreview>>,
     pub settings_requested: AtomicBool,
@@ -81,8 +114,10 @@ impl Runtime {
                 message: "就绪".into(),
             }),
             transcript: Mutex::new(Transcript::default()),
+            recent: Mutex::new(VecDeque::new()),
             level: Mutex::new(Level::default()),
             active: Mutex::new(None),
+            microphone_stream: Mutex::new(()),
             overlay_visible: AtomicBool::new(false),
             overlay_preview: Mutex::new(None),
             settings_requested: AtomicBool::new(false),
@@ -101,6 +136,13 @@ impl Runtime {
     /// Captures the foreground insertion point synchronously, before the
     /// desktop can observe the overlay request and create/show its window.
     pub fn start(self: &Arc<Self>) -> Result<(), String> {
+        self.start_recording(None).map(drop)
+    }
+
+    pub fn start_recording(
+        self: &Arc<Self>,
+        held: Option<platform::Shortcut>,
+    ) -> Result<mpsc::UnboundedSender<session::Command>, String> {
         // Keep the same lock order as save_config. The active lock serializes
         // starts with saves and protects an existing input guard from recapture.
         let mut active = self.active.lock().unwrap();
@@ -124,7 +166,11 @@ impl Runtime {
             } else {
                 InputState::Writing(target)
             };
-        *active = Some(Active { stop, id, input });
+        *active = Some(Active {
+            stop: stop.clone(),
+            id,
+            input,
+        });
         self.set_transcript("", "", false);
         *self.level.lock().unwrap() = Level {
             started_at: Some(Instant::now()),
@@ -135,9 +181,9 @@ impl Runtime {
         self.overlay_visible.store(true, Ordering::SeqCst);
         let runtime = Arc::clone(self);
         self.executor.spawn(async move {
-            session::run(runtime, config, target, id, receiver).await;
+            session::run(runtime, config, target, id, receiver, held).await;
         });
-        Ok(())
+        Ok(stop)
     }
 
     pub fn toggle(self: &Arc<Self>) -> Result<(), String> {
@@ -158,12 +204,13 @@ impl Runtime {
         let resume = match active.input {
             InputState::Paused => true,
             InputState::Writing(target) => !target.valid(),
-            InputState::Preview | InputState::Finishing => false,
+            InputState::Preview | InputState::Finishing(_) => false,
+            InputState::Cancelled => return true,
         };
         if resume {
             self.resume_locked(active);
         } else {
-            active.input = InputState::Finishing;
+            active.finish_input();
             let _ = active.stop.send(session::Command::Finish);
         }
         true
@@ -186,13 +233,20 @@ impl Runtime {
     }
 
     fn resume_locked(&self, active: &mut Active) {
-        let hotkey = self.config.lock().unwrap().hotkey.clone();
+        let config = self.config.lock().unwrap();
+        let hotkey = config.hotkey.clone();
+        let resume_hint = if config.hold_to_talk {
+            "点「继续」".into()
+        } else {
+            format!("按 {hotkey}")
+        };
+        drop(config);
         let target = session::InputGuard(platform::InputTarget::capture(&hotkey));
         if target.0.process_id() == std::process::id() || !target.0.valid() {
             active.input = InputState::Paused;
             self.set_status(
                 "paused",
-                format!("请先点选要继续写入的输入框，再按 {hotkey}。识别仍在继续。"),
+                format!("请先点选要继续写入的输入框，再{resume_hint}。识别仍在继续。"),
             );
             return;
         }
@@ -208,9 +262,14 @@ impl Runtime {
             // fresh generation. It must not invalidate the new insertion point.
             if matches!(active.input, InputState::Writing(current) if current == target) {
                 active.input = InputState::Paused;
+                let resume_hint = if self.config.lock().unwrap().hold_to_talk {
+                    "点「继续」"
+                } else {
+                    "按快捷键或点「继续」"
+                };
                 self.set_status(
                     "paused",
-                    format!("{reason} 识别继续，按快捷键或点「继续」可从当前光标接着写。"),
+                    format!("{reason} 识别继续，{resume_hint}可从当前光标接着写。"),
                 );
             }
         }
@@ -218,12 +277,17 @@ impl Runtime {
 
     pub fn stop(&self, cancel: bool) {
         if let Some(active) = self.active.lock().unwrap().as_mut() {
-            active.input = InputState::Finishing;
-            let _ = active.stop.send(if cancel {
+            if matches!(active.input, InputState::Cancelled) {
+                return;
+            }
+            let command = if cancel {
+                active.cancel_input();
                 session::Command::Cancel
             } else {
+                active.finish_input();
                 session::Command::Finish
-            });
+            };
+            let _ = active.stop.send(command);
         }
     }
 
@@ -260,6 +324,9 @@ impl Runtime {
         }
         // The atomic disk replacement and OS setting both succeeded. Only now
         // publish the new in-memory config; failures keep the previous values.
+        if !config.history_enabled {
+            self.clear_recent();
+        }
         *current = config;
         Ok(())
     }
@@ -302,6 +369,56 @@ impl Runtime {
         platform::copy_text(&text)
     }
 
+    /// Called once at completion, while the session still owns the active slot.
+    pub fn remember_result(&self, id: u64, interrupted: bool) {
+        if !self.config.lock().unwrap().history_enabled {
+            return;
+        }
+        let transcript = self.transcript.lock().unwrap();
+        let text = format!("{}{}", transcript.stable, transcript.partial);
+        if text.trim().is_empty() {
+            return;
+        }
+        let label = if interrupted {
+            "中断前的文字"
+        } else if transcript.corrected {
+            "已校对"
+        } else {
+            "已完成"
+        };
+        let preview = text
+            .trim()
+            .chars()
+            .take(96)
+            .map(|ch| if ch.is_whitespace() { ' ' } else { ch })
+            .collect();
+        let mut recent = self.recent.lock().unwrap();
+        recent.push_front(RecentResult {
+            id,
+            label,
+            preview,
+            text: text.into(),
+        });
+        recent.truncate(RECENT_LIMIT);
+    }
+
+    pub fn recent_results(&self) -> Vec<RecentResult> {
+        self.recent.lock().unwrap().iter().cloned().collect()
+    }
+
+    pub fn clear_recent(&self) {
+        self.recent.lock().unwrap().clear();
+    }
+
+    pub fn copy_recent(&self, id: u64) -> Result<(), String> {
+        let recent = self.recent.lock().unwrap();
+        let entry = recent
+            .iter()
+            .find(|r| r.id == id)
+            .ok_or("这条记录已被清除。")?;
+        platform::copy_text(&entry.text)
+    }
+
     pub fn set_status(&self, state: &str, message: impl Into<String>) {
         *self.status.lock().unwrap() = Status {
             state: state.into(),
@@ -342,6 +459,40 @@ mod tests {
             .join(uuid::Uuid::new_v4().to_string())
             .join("settings.json");
         Runtime::new(AppConfig::default(), path)
+    }
+
+    #[test]
+    fn recent_results_are_opt_in_bounded_and_cleared_after_disabling() {
+        let runtime = runtime();
+        runtime.set_transcript("不应保留", "", false);
+        runtime.remember_result(1, false);
+        assert!(runtime.recent_results().is_empty());
+
+        let mut config = runtime.config.lock().unwrap().clone();
+        config.history_enabled = true;
+        runtime.save_config(config.clone()).unwrap();
+        for id in 2..=7 {
+            runtime.set_transcript("第一行\n", &format!("未确认{id}"), false);
+            runtime.remember_result(id, true);
+        }
+        runtime.set_transcript(" ", "", false);
+        runtime.remember_result(8, false);
+        let recent = runtime.recent_results();
+        assert_eq!(
+            recent.iter().map(|r| r.id).collect::<Vec<_>>(),
+            [7, 6, 5, 4, 3]
+        );
+        assert_eq!(&*recent[0].text, "第一行\n未确认7");
+        assert_eq!(recent[0].preview, "第一行 未确认7");
+        assert_eq!(recent[0].label, "中断前的文字");
+        let saved = std::fs::read_to_string(&runtime.config_path).unwrap();
+        assert!(!saved.contains("第一行"));
+
+        config.history_enabled = false;
+        runtime.save_config(config).unwrap();
+        assert!(runtime.recent_results().is_empty());
+        assert!(runtime.copy_recent(7).is_err());
+        std::fs::remove_dir_all(runtime.config_path.parent().unwrap()).unwrap();
     }
 
     #[test]

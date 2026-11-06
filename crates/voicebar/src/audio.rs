@@ -1,7 +1,13 @@
 use crate::runtime::Runtime;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::FromSample;
-use std::sync::{mpsc, Arc};
+use std::{
+    sync::{
+        atomic::{AtomicBool, AtomicU8, Ordering},
+        mpsc, Arc,
+    },
+    time::{Duration, Instant},
+};
 
 pub fn devices() -> Result<Vec<String>, String> {
     cpal::default_host()
@@ -14,6 +20,163 @@ pub fn devices() -> Result<Vec<String>, String> {
         })
         .collect()
 }
+
+fn input_device(name: &str) -> Result<cpal::Device, String> {
+    let host = cpal::default_host();
+    if name.is_empty() {
+        host.default_input_device()
+            .ok_or_else(|| "没有可用的麦克风".into())
+    } else {
+        host.input_devices()
+            .map_err(|e| e.to_string())?
+            .find(|device| device.description().is_ok_and(|d| d.name() == name))
+            .ok_or_else(|| "所选麦克风已断开，请刷新设备后重新选择".into())
+    }
+}
+
+#[derive(Default)]
+struct Meter {
+    level: AtomicU8,
+    heard: AtomicBool,
+}
+
+impl Meter {
+    fn observe<T: cpal::Sample>(&self, samples: &[T])
+    where
+        f32: FromSample<T>,
+    {
+        if samples.is_empty() {
+            return;
+        }
+        let power = samples
+            .iter()
+            .map(|v| v.to_sample::<f32>().powi(2))
+            .sum::<f32>()
+            / samples.len() as f32;
+        // Map -60..0 dBFS onto the visible meter. Keep a separate latch so a
+        // pause at the end of the test does not erase the successful result.
+        let level = ((10.0 * power.log10() + 60.0) * 100.0 / 60.0).clamp(0.0, 100.0);
+        self.level.store(level.round() as u8, Ordering::Relaxed);
+        if power >= 0.012_f32.powi(2) {
+            self.heard.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
+pub struct MicrophoneTest {
+    // Dropping the sender cancels the test, including while opening a device.
+    _cancel: mpsc::Sender<()>,
+    result: mpsc::Receiver<String>,
+    meter: Arc<Meter>,
+}
+
+impl MicrophoneTest {
+    pub fn start(runtime: Arc<Runtime>, device_name: String) -> Self {
+        let (cancel, cancelled) = mpsc::channel();
+        let (done, result) = mpsc::channel();
+        let meter = Arc::new(Meter::default());
+        let capture_meter = meter.clone();
+        std::thread::spawn(move || {
+            let result = test_microphone(&runtime, &device_name, capture_meter, cancelled);
+            let _ = done.send(result.unwrap_or_else(|e| format!("麦克风测试失败：{e}")));
+        });
+        Self {
+            _cancel: cancel,
+            result,
+            meter,
+        }
+    }
+
+    pub fn level(&self) -> u8 {
+        self.meter.level.load(Ordering::Relaxed)
+    }
+
+    pub fn result(&self) -> Option<String> {
+        match self.result.try_recv() {
+            Ok(result) => Some(result),
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(mpsc::TryRecvError::Disconnected) => Some("麦克风测试异常结束，请重试。".into()),
+        }
+    }
+}
+
+fn meter_stream<T: cpal::SizedSample>(
+    device: &cpal::Device,
+    config: cpal::StreamConfig,
+    meter: Arc<Meter>,
+    errors: mpsc::SyncSender<cpal::Error>,
+) -> Result<cpal::Stream, String>
+where
+    f32: FromSample<T>,
+{
+    device
+        .build_input_stream(
+            config,
+            move |samples: &[T], _| meter.observe(samples),
+            move |err| {
+                let _ = errors.try_send(err);
+            },
+            None,
+        )
+        .map_err(|e| e.to_string())
+}
+
+fn test_microphone(
+    runtime: &Runtime,
+    device_name: &str,
+    meter: Arc<Meter>,
+    cancelled: mpsc::Receiver<()>,
+) -> Result<String, String> {
+    let interrupted = || runtime.active.lock().unwrap().is_some();
+    if interrupted() {
+        return Ok("听写进行中，请在结束后测试。".into());
+    }
+    // Share the device with normal dictation. A new recording claims active
+    // first, then waits for this test to close its CPAL stream before opening.
+    let _device_guard = runtime
+        .microphone_stream
+        .try_lock()
+        .map_err(|_| "麦克风忙，请稍后重试".to_owned())?;
+    if cancelled.try_recv() != Err(mpsc::TryRecvError::Empty) {
+        return Ok("麦克风测试已停止。".into());
+    }
+    let device = input_device(device_name)?;
+    let format = device.default_input_config().map_err(|e| e.to_string())?;
+    let config = format.clone().into();
+    let (error_tx, errors) = mpsc::sync_channel(1);
+    let stream = match format.sample_format() {
+        cpal::SampleFormat::F32 => meter_stream::<f32>(&device, config, meter.clone(), error_tx),
+        cpal::SampleFormat::I16 => meter_stream::<i16>(&device, config, meter.clone(), error_tx),
+        cpal::SampleFormat::U16 => meter_stream::<u16>(&device, config, meter.clone(), error_tx),
+        f => Err(format!("暂不支持麦克风格式 {f:?}")),
+    }?;
+    if interrupted() || cancelled.try_recv() != Err(mpsc::TryRecvError::Empty) {
+        return Ok("麦克风测试已停止。".into());
+    }
+    stream.play().map_err(|e| e.to_string())?;
+    let deadline = Instant::now() + Duration::from_secs(6);
+    loop {
+        if let Ok(error) = errors.try_recv() {
+            return Err(error.to_string());
+        }
+        if interrupted() {
+            return Ok("已结束测试，麦克风已交给听写。".into());
+        }
+        if Instant::now() >= deadline {
+            return Ok(if meter.heard.load(Ordering::Relaxed) {
+                "测试完成，已检测到声音。"
+            } else {
+                "未检测到明显声音，请检查设备选择、静音开关和 Windows 麦克风权限。"
+            }
+            .into());
+        }
+        if cancelled.recv_timeout(Duration::from_millis(40)) != Err(mpsc::RecvTimeoutError::Timeout)
+        {
+            return Ok("麦克风测试已停止。".into());
+        }
+    }
+}
+
 pub struct Capture {
     stop: mpsc::Sender<()>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -30,19 +193,10 @@ impl Capture {
         let (stop, rx) = mpsc::channel();
         let (ready_tx, ready) = mpsc::sync_channel(1);
         let thread = std::thread::spawn(move || {
+            let state = runtime.clone();
+            let _device_guard = state.microphone_stream.lock().unwrap();
             let result = (|| -> Result<cpal::Stream, String> {
-                let host = cpal::default_host();
-                let device = if device_name.is_empty() {
-                    host.default_input_device().ok_or("没有可用的麦克风")?
-                } else {
-                    host.input_devices()
-                        .map_err(|e| e.to_string())?
-                        .find(|d| {
-                            d.description()
-                                .is_ok_and(|description| description.name() == device_name)
-                        })
-                        .ok_or("所选麦克风已断开，请重新选择")?
-                };
+                let device = input_device(&device_name)?;
                 let supported = device.default_input_config().map_err(|e| e.to_string())?;
                 let config: cpal::StreamConfig = supported.clone().into();
                 let silence = SilenceDetector::new(silence_stop_secs, silence_end);
@@ -257,6 +411,31 @@ impl Converter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn microphone_meter_distinguishes_silence_and_remembers_signal() {
+        let meter = Meter::default();
+        meter.observe(&[32768u16; 4]);
+        assert_eq!(meter.level.load(Ordering::Relaxed), 0);
+        assert!(!meter.heard.load(Ordering::Relaxed));
+
+        // -20 dBFS maps to two thirds of the 60 dB display. Opposite samples
+        // must not cancel one another, including on a stereo microphone.
+        meter.observe(&[3277i16, -3277]);
+        assert_eq!(meter.level.load(Ordering::Relaxed), 67);
+        meter.observe(&[0.0f32; 8]);
+        assert_eq!(meter.level.load(Ordering::Relaxed), 0);
+        assert!(meter.heard.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn microphone_test_respects_the_device_lock_before_opening_hardware() {
+        let runtime = Runtime::new(crate::config::AppConfig::default(), "unused".into());
+        let _recording_device = runtime.microphone_stream.lock().unwrap();
+        let (_cancel, stop) = mpsc::channel();
+        let result = test_microphone(&runtime, "no device", Arc::new(Meter::default()), stop);
+        assert!(result.unwrap_err().contains("麦克风忙"));
+    }
+
     #[test]
     fn silence_ends_only_after_voice_and_a_complete_pause() {
         let (tx, mut rx) = tokio::sync::oneshot::channel();

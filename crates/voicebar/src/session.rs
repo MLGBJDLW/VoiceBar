@@ -162,39 +162,22 @@ fn tail_edit<'a>(old: &'a str, new: &'a str) -> TailEdit<'a> {
 
 pub async fn run(
     runtime: Arc<Runtime>,
-    config: AppConfig,
+    mut config: AppConfig,
     target: platform::InputTarget,
     id: u64,
     mut stop: mpsc::UnboundedReceiver<Command>,
+    held: Option<platform::Shortcut>,
 ) {
-    let result = execute(&runtime, &config, InputGuard(target), &mut stop).await;
-    let auto_hide = matches!(
-        &result,
-        Ok(Outcome::Cancelled) | Ok(Outcome::Done { keep: false, .. })
-    );
-    {
-        // Publish completion before another start can claim the active slot.
-        let mut active = runtime.active.lock().unwrap();
-        if active.as_ref().map(|v| v.id) != Some(id) {
-            return;
-        }
-        match result {
-            Ok(Outcome::Cancelled) => {
-                runtime.set_status("idle", "已取消；已经写入的文字会保留");
-                runtime.set_transcript("", "", false);
-            }
-            Ok(Outcome::Done { message, .. }) => runtime.set_status("done", message),
-            Err(e) => runtime.set_status("error", e),
-        }
-        // Preserve session identity for the renderer while removing stale audio.
-        let mut level = runtime.level.lock().unwrap();
-        level.audio = Default::default();
-        level.updated_at = None;
-        active.take();
+    if held.is_some() {
+        defer_held_input(&mut config);
     }
+    let result = execute(&runtime, &config, InputGuard(target), &mut stop, held).await;
+    // Release watchers and repeat-press handling must see this channel close
+    // before the active slot becomes available during the acknowledgement.
+    drop(stop);
     // Successful sessions disappear after a short acknowledgement; errors stay
     // visible so the user can recover the transcript without losing work.
-    if auto_hide {
+    if complete_session(&runtime, id, result) {
         tokio::time::sleep(Duration::from_millis(2200)).await;
         // Holding active through the visibility update prevents an older
         // session's timer from hiding a newly started recording.
@@ -217,11 +200,75 @@ enum Outcome {
     Done { message: String, keep: bool },
 }
 
+fn complete_session(runtime: &Runtime, id: u64, result: Result<Outcome, String>) -> bool {
+    // Serialize cancellation, history and completion with the next start.
+    let mut active = runtime.active.lock().unwrap();
+    let Some(current) = active.as_ref().filter(|a| a.id == id) else {
+        return false;
+    };
+    let result = if matches!(current.input, crate::runtime::InputState::Cancelled) {
+        Ok(Outcome::Cancelled)
+    } else {
+        result
+    };
+    let auto_hide = matches!(
+        &result,
+        Ok(Outcome::Cancelled | Outcome::Done { keep: false, .. })
+    );
+    if !matches!(result, Ok(Outcome::Cancelled)) {
+        runtime.remember_result(id, result.is_err());
+    }
+    match result {
+        Ok(Outcome::Cancelled) => {
+            runtime.set_status("idle", "已取消；已经写入的文字会保留");
+            runtime.set_transcript("", "", false);
+        }
+        Ok(Outcome::Done { message, .. }) => runtime.set_status("done", message),
+        Err(e) => runtime.set_status("error", e),
+    }
+    let mut level = runtime.level.lock().unwrap();
+    level.audio = Default::default();
+    level.updated_at = None;
+    active.take();
+    auto_hide
+}
+
+fn defer_held_input(config: &mut AppConfig) {
+    // The chord can contain Ctrl/Alt/Win. Recognize normally and wait until
+    // release before sending a single result to the protected insertion point.
+    if config.injection.mode == "realtime" {
+        config.injection.method = "unicode".into();
+    }
+    if config.injection.mode != "preview" {
+        config.injection.mode = "final".into();
+    }
+}
+
+async fn cancelled(stop: &mut mpsc::UnboundedReceiver<Command>) {
+    while !matches!(stop.recv().await, Some(Command::Cancel) | None) {}
+}
+
+fn retain_queued_transcript(
+    runtime: &Runtime,
+    output: &mut mpsc::UnboundedReceiver<providers::Transcript>,
+) {
+    // Each update is a complete snapshot. Preserve the newest result without
+    // injecting into another application while unwinding an error.
+    let mut latest = None;
+    while let Ok(update) = output.try_recv() {
+        latest = Some(update);
+    }
+    if let Some(update) = latest {
+        runtime.set_transcript(&update.stable, &update.partial, false);
+    }
+}
+
 async fn execute(
     runtime: &Arc<Runtime>,
     config: &AppConfig,
     target: InputGuard,
     stop: &mut mpsc::UnboundedReceiver<Command>,
+    held: Option<platform::Shortcut>,
 ) -> Result<Outcome, String> {
     let (audio_tx, audio_rx) = mpsc::channel(256);
     let (output_tx, mut output_rx) = mpsc::unbounded_channel();
@@ -267,6 +314,8 @@ async fn execute(
         "listening",
         if delivery.internal {
             "正在录音 · 设置窗口内仅预览，不向配置表单输入"
+        } else if held.is_some() {
+            "按住说话中 · 松开快捷键结束"
         } else {
             "正在录音 · 等待识别服务响应"
         },
@@ -279,7 +328,7 @@ async fn execute(
     let max = tokio::time::sleep(Duration::from_secs(limit));
     tokio::pin!(max);
     let mut focus = tokio::time::interval(Duration::from_millis(100));
-    let mut finished = false;
+    let mut finished = None;
     loop {
         tokio::select! {
             command=stop.recv()=>match command {
@@ -299,7 +348,7 @@ async fn execute(
                 if result.is_ok(){capture.stop();break;}
                 return Err("麦克风停顿检测已断开，请重新开始录音。".into());
             }
-            Some(e)=errors_rx.recv()=>{capture.stop();provider.abort();return Err(e);}
+            Some(e)=errors_rx.recv()=>{capture.stop();provider.abort();retain_queued_transcript(runtime,&mut output_rx);return Err(e);}
             _=focus.tick()=>{
                 if config.injection.mode != "preview" && !delivery.internal && !delivery.paused && !delivery.target.0.valid() {
                     delivery.paused=true;
@@ -310,18 +359,21 @@ async fn execute(
                 update_transcript(runtime,config,&mut delivery,&mut current,update).await;
             }
             result=&mut provider=>{
-                capture.stop();
-                result.map_err(|e|e.to_string())?.map_err(|e|format!("识别服务错误：{e}"))?;
-                finished=true;break;
+                finished=Some(result);break;
             }
         }
     }
     capture.stop();
     if let Some(active) = runtime.active.lock().unwrap().as_mut() {
-        active.input = crate::runtime::InputState::Finishing;
+        if matches!(active.input, crate::runtime::InputState::Cancelled) {
+            return Ok(Outcome::Cancelled);
+        }
+        active.finish_input();
     }
     runtime.set_status("processing", "正在收尾并确认最后的文字…");
-    if !finished {
+    let result = if let Some(result) = finished {
+        result
+    } else {
         let wait = if ["openai-compatible", "whispercpp"].contains(&config.provider.kind.as_str()) {
             125
         } else {
@@ -332,11 +384,18 @@ async fn execute(
         loop {
             tokio::select! {
                 command=stop.recv()=>{if matches!(command, Some(Command::Cancel) | None) {provider.abort();return Ok(Outcome::Cancelled);}}
-                _=&mut deadline=>{provider.abort();return Err("识别收尾超时，已保留当前文本，请复制后重试。".into());}
+                _=&mut deadline=>{provider.abort();retain_queued_transcript(runtime,&mut output_rx);return Err("识别收尾超时，已保留当前文本，请复制后重试。".into());}
                 Some(update)=output_rx.recv()=>{update_transcript(runtime,config,&mut delivery,&mut current,update).await;}
-                result=&mut provider=>{result.map_err(|e|e.to_string())?.map_err(|e|format!("识别服务错误：{e}"))?;break;}
+                result=&mut provider=>break result,
             }
         }
+    };
+    if let Err(error) = result
+        .map_err(|error| error.to_string())
+        .and_then(|result| result.map_err(|error| format!("识别服务错误：{error}")))
+    {
+        retain_queued_transcript(runtime, &mut output_rx);
+        return Err(error);
     }
     while let Ok(update) = output_rx.try_recv() {
         update_transcript(runtime, config, &mut delivery, &mut current, update).await;
@@ -361,7 +420,7 @@ async fn execute(
         runtime.set_status("processing", "正在校对文字…");
         let corrected = tokio::select! {
             result=correct(config,&original)=>result,
-            _=async {loop{if matches!(stop.recv().await, Some(Command::Cancel) | None){break;}}}=>return Ok(Outcome::Cancelled),
+            _=cancelled(stop)=>return Ok(Outcome::Cancelled),
         };
         match corrected {
             Ok(text) => {
@@ -378,7 +437,22 @@ async fn execute(
     }
     let mut message: String;
     if config.injection.mode == "final" {
-        if let Err(e) = delivery.append(&final_text, &config.injection.method).await {
+        // Silence, the duration limit or a provider may finish before key-up.
+        // Also account for releasing one modifier before the primary key.
+        let mut keys_ready = true;
+        if let Some(chord) = held.filter(|_| !delivery.internal && !delivery.paused) {
+            if !chord.ready_for_input() {
+                runtime.set_status("processing", "录音已结束，松开快捷键后写入…");
+                keys_ready = tokio::select! {
+                    _ = cancelled(stop) => return Ok(Outcome::Cancelled),
+                    ready = chord.wait_for_input() => ready,
+                };
+            }
+        }
+        if !keys_ready {
+            delivery.paused = true;
+            message = "识别完成 · 快捷键仍按下，请复制结果".into();
+        } else if let Err(e) = delivery.append(&final_text, &config.injection.method).await {
             message = e;
         } else if delivery.internal {
             message = "识别完成 · 设置窗口内仅预览，可复制结果".into();
@@ -505,6 +579,88 @@ async fn correct(config: &AppConfig, text: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn held_sessions_defer_writes_and_respect_preview() {
+        for (before, method, after, used_method) in [
+            ("realtime", "clipboard", "final", "unicode"),
+            ("stable", "clipboard", "final", "clipboard"),
+            ("final", "unicode", "final", "unicode"),
+            ("preview", "clipboard", "preview", "clipboard"),
+        ] {
+            let mut config = AppConfig::default();
+            config.injection.mode = before.into();
+            config.injection.method = method.into();
+            defer_held_input(&mut config);
+            assert_eq!(config.injection.mode, after);
+            assert_eq!(config.injection.method, used_method);
+        }
+    }
+
+    #[test]
+    fn late_cancel_wins_over_completion_without_archiving_or_clearing_the_next_session() {
+        use crate::runtime::{Active, InputState};
+        let runtime = Runtime::new(
+            AppConfig {
+                history_enabled: true,
+                ..Default::default()
+            },
+            "unused".into(),
+        );
+        let (stop, _rx) = mpsc::unbounded_channel();
+        *runtime.active.lock().unwrap() = Some(Active {
+            stop,
+            id: 1,
+            input: InputState::Preview,
+        });
+        runtime.set_transcript("不应保留", "", false);
+        runtime.stop(false);
+        runtime.stop(true);
+        runtime.stop(false);
+        let done = || {
+            Ok(Outcome::Done {
+                message: "已完成".into(),
+                keep: false,
+            })
+        };
+        assert!(complete_session(&runtime, 1, done()));
+        assert!(runtime.transcript.lock().unwrap().stable.is_empty());
+        assert!(runtime.recent_results().is_empty());
+        assert!(runtime.active.lock().unwrap().is_none());
+
+        let (stop, _rx) = mpsc::unbounded_channel();
+        *runtime.active.lock().unwrap() = Some(Active {
+            stop,
+            id: 2,
+            input: InputState::Preview,
+        });
+        runtime.set_transcript("下一次听写", "", false);
+        assert!(!complete_session(&runtime, 1, Ok(Outcome::Cancelled)));
+        assert_eq!(runtime.active.lock().unwrap().as_ref().unwrap().id, 2);
+        assert!(complete_session(&runtime, 2, done()));
+        assert_eq!(runtime.recent_results()[0].preview, "下一次听写");
+    }
+
+    #[test]
+    fn provider_error_recovers_the_latest_pending_revision() {
+        let runtime = Runtime::new(AppConfig::default(), "unused.json".into());
+        runtime.set_transcript("第一句", "暂定", false);
+        let (output, mut input) = mpsc::unbounded_channel();
+        for partial in ["早期", "最后一版"] {
+            output
+                .send(providers::Transcript {
+                    stable: "第二句".into(),
+                    partial: partial.into(),
+                })
+                .unwrap();
+        }
+        drop(output);
+        retain_queued_transcript(&runtime, &mut input);
+        retain_queued_transcript(&runtime, &mut input);
+        let transcript = runtime.transcript.lock().unwrap();
+        assert_eq!(transcript.stable, "第二句");
+        assert_eq!(transcript.partial, "最后一版");
+    }
 
     #[test]
     fn resume_only_revises_text_owned_at_the_new_caret() {

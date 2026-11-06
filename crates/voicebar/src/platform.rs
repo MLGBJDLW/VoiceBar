@@ -1108,6 +1108,53 @@ pub fn process_id(target: isize) -> u32 {
         0
     }
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Shortcut {
+    pub modifiers: u32,
+    pub key: u32,
+}
+
+impl Shortcut {
+    fn held_with(self, down: impl Fn(u32) -> bool) -> bool {
+        down(self.key)
+            && (self.modifiers & 1 == 0 || down(0x12))
+            && (self.modifiers & 2 == 0 || down(0x11))
+            && (self.modifiers & 4 == 0 || down(0x10))
+            && (self.modifiers & 8 == 0 || down(0x5b) || down(0x5c))
+    }
+
+    pub fn held(self) -> bool {
+        self.held_with(key_down)
+    }
+
+    pub fn ready_for_input(self) -> bool {
+        !key_down(self.key) && modifiers_released()
+    }
+
+    pub async fn wait_for_input(self) -> bool {
+        let released = async {
+            while !self.ready_for_input() {
+                tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(3), released)
+            .await
+            .is_ok()
+    }
+}
+
+fn key_down(key: u32) -> bool {
+    #[cfg(windows)]
+    {
+        unsafe { win::GetAsyncKeyState(key as i32) < 0 }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = key;
+        false
+    }
+}
+
 pub fn modifiers_released() -> bool {
     #[cfg(windows)]
     {
@@ -1536,6 +1583,30 @@ mod tests {
     }
 
     #[test]
+    fn hold_ends_on_primary_or_required_modifier_release() {
+        let chord = Shortcut {
+            modifiers: 3,
+            key: 0x20,
+        };
+        let held = |keys: &[u32]| chord.held_with(|key| keys.contains(&key));
+        assert!(held(&[0x11, 0x12, 0x20]));
+        assert!(!held(&[0x11, 0x12]));
+        assert!(!held(&[0x11, 0x20]));
+        assert!(!held(&[0x12, 0x20]));
+        let win_f8 = Shortcut {
+            modifiers: 8,
+            key: 0x77,
+        };
+        assert!(win_f8.held_with(|key| [0x5c, 0x77].contains(&key)));
+        let f8 = Shortcut {
+            modifiers: 0,
+            key: 0x77,
+        };
+        assert!(f8.held_with(|key| key == 0x77));
+        assert!(!f8.held_with(|_| false));
+    }
+
+    #[test]
     fn realtime_text_rejects_ambiguous_deletion_before_touching_target() {
         for unsafe_text in [
             "😀", "e\u{301}", "\u{200d}", "\u{fe0f}", "\n", "\t", "क", "\u{3099}", "\u{302a}",
@@ -1807,7 +1878,25 @@ mod tests {
         let target = &session.0;
         assert_eq!(target.window, fixture.window);
         assert_eq!(target.focus, fixture.edit);
-        physical_keys(&[(0x11, true), (0x12, true), (0x10, true), (0x87, true)]);
+        let chord = Shortcut {
+            modifiers: 7,
+            key: 0x87,
+        };
+        let worker = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        assert!(chord.held());
+        assert!(
+            !worker.block_on(chord.wait_for_input()),
+            "held shortcut must time out to copy-only"
+        );
+        fixture.expect_text("");
+        physical_keys(&[(0x11, true), (0x12, true), (0x10, true)]);
+        assert!(!chord.held(), "releasing a chord modifier ends capture");
+        assert!(!chord.ready_for_input(), "primary key is still pressed");
+        physical_keys(&[(0x87, true)]);
+        assert!(worker.block_on(chord.wait_for_input()));
         target
             .validate()
             .expect("start shortcut release invalidated capture");
@@ -1868,6 +1957,38 @@ mod tests {
         );
         assert!(realtime_edit(&session.0, "完成", "must not appear", "unicode").is_err());
         fixture.expect_text("前文 hello 完成");
+
+        // Cancelling during the paced, final-only write must revoke the
+        // generation even though recording has already transitioned to Finish.
+        let target = InputTarget::capture(HOTKEY);
+        target.validate().unwrap();
+        let runtime = crate::runtime::Runtime::new(Default::default(), "unused".into());
+        let (stop, _rx) = tokio::sync::mpsc::unbounded_channel();
+        *runtime.active.lock().unwrap() = Some(crate::runtime::Active {
+            stop,
+            id: 1,
+            input: crate::runtime::InputState::Writing(target),
+        });
+        runtime.stop(false);
+        let writer = std::thread::spawn(move || type_text(&target, &"A".repeat(200)));
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !fixture.text().contains('A') && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            fixture.text().contains('A'),
+            "the fixture must cancel a live write"
+        );
+        runtime.stop(true);
+        assert!(writer.join().unwrap().is_err());
+        assert!(!target.valid());
+        assert!(fixture.text().matches('A').count() < 200);
+        let next = Session(InputTarget::capture(HOTKEY));
+        target.release();
+        assert!(
+            next.0.valid(),
+            "retiring an old target must preserve the new one"
+        );
     }
 
     #[cfg(windows)]
