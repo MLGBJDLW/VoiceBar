@@ -41,8 +41,17 @@ pub struct OverlayPreview {
     pub started_at: Instant,
 }
 
+#[derive(Clone, Copy)]
+pub enum InputState {
+    Preview,
+    Writing(platform::InputTarget),
+    Paused,
+    Finishing,
+}
+
 pub struct Active {
-    pub stop: mpsc::UnboundedSender<bool>,
+    pub stop: mpsc::UnboundedSender<session::Command>,
+    pub input: InputState,
     pub id: u64,
 }
 
@@ -109,7 +118,13 @@ impl Runtime {
         let id = self.counter.fetch_add(1, Ordering::SeqCst) + 1;
         let (stop, receiver) = mpsc::unbounded_channel();
         let target = platform::InputTarget::capture(&config.hotkey);
-        *active = Some(Active { stop, id });
+        let input =
+            if config.injection.mode == "preview" || target.process_id() == std::process::id() {
+                InputState::Preview
+            } else {
+                InputState::Writing(target)
+            };
+        *active = Some(Active { stop, id, input });
         self.set_transcript("", "", false);
         *self.level.lock().unwrap() = Level {
             started_at: Some(Instant::now()),
@@ -125,9 +140,90 @@ impl Runtime {
         Ok(())
     }
 
+    pub fn toggle(self: &Arc<Self>) -> Result<(), String> {
+        if self.toggle_active() {
+            Ok(())
+        } else {
+            self.start()
+        }
+    }
+
+    pub fn toggle_active(&self) -> bool {
+        let mut slot = self.active.lock().unwrap();
+        let Some(active) = slot.as_mut() else {
+            return false;
+        };
+        // A physical edit can reach the input hook just before the shortcut,
+        // between two session focus ticks. Check the live guard here as well.
+        let resume = match active.input {
+            InputState::Paused => true,
+            InputState::Writing(target) => !target.valid(),
+            InputState::Preview | InputState::Finishing => false,
+        };
+        if resume {
+            self.resume_locked(active);
+        } else {
+            active.input = InputState::Finishing;
+            let _ = active.stop.send(session::Command::Finish);
+        }
+        true
+    }
+
+    pub fn writing_paused(&self) -> bool {
+        self.active
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|active| matches!(active.input, InputState::Paused))
+    }
+
+    pub fn resume(&self) {
+        if let Some(active) = self.active.lock().unwrap().as_mut() {
+            if matches!(active.input, InputState::Paused) {
+                self.resume_locked(active);
+            }
+        }
+    }
+
+    fn resume_locked(&self, active: &mut Active) {
+        let hotkey = self.config.lock().unwrap().hotkey.clone();
+        let target = session::InputGuard(platform::InputTarget::capture(&hotkey));
+        if target.0.process_id() == std::process::id() || !target.0.valid() {
+            active.input = InputState::Paused;
+            self.set_status(
+                "paused",
+                format!("请先点选要继续写入的输入框，再按 {hotkey}。识别仍在继续。"),
+            );
+            return;
+        }
+        active.input = InputState::Writing(target.0);
+        let observed = self.transcript.lock().unwrap().clone();
+        let _ = active.stop.send(session::Command::Resume(target, observed));
+        self.set_status("listening", "已继续写入当前光标");
+    }
+
+    pub fn pause_writing(&self, target: platform::InputTarget, reason: &str) {
+        if let Some(active) = self.active.lock().unwrap().as_mut() {
+            // An old, in-flight edit may fail just after the user resumed on a
+            // fresh generation. It must not invalidate the new insertion point.
+            if matches!(active.input, InputState::Writing(current) if current == target) {
+                active.input = InputState::Paused;
+                self.set_status(
+                    "paused",
+                    format!("{reason} 识别继续，按快捷键或点「继续」可从当前光标接着写。"),
+                );
+            }
+        }
+    }
+
     pub fn stop(&self, cancel: bool) {
-        if let Some(active) = self.active.lock().unwrap().as_ref() {
-            let _ = active.stop.send(cancel);
+        if let Some(active) = self.active.lock().unwrap().as_mut() {
+            active.input = InputState::Finishing;
+            let _ = active.stop.send(if cancel {
+                session::Command::Cancel
+            } else {
+                session::Command::Finish
+            });
         }
     }
 
@@ -249,10 +345,39 @@ mod tests {
     }
 
     #[test]
+    fn paused_shortcut_without_a_writable_target_keeps_the_session_and_transcript() {
+        let runtime = Arc::new(runtime());
+        let (stop, mut commands) = mpsc::unbounded_channel();
+        *runtime.active.lock().unwrap() = Some(Active {
+            stop,
+            id: 23,
+            input: InputState::Paused,
+        });
+        // An unsupported chord deliberately prevents the test from acquiring
+        // hooks or writing into the foreground application.
+        runtime.config.lock().unwrap().hotkey = "invalid test shortcut".into();
+        runtime.overlay_visible.store(true, Ordering::SeqCst);
+        runtime.set_transcript("甲", "乙", false);
+        runtime.toggle().unwrap();
+        assert!(commands.try_recv().is_err());
+        assert!(runtime.writing_paused());
+        assert_eq!(runtime.status.lock().unwrap().state, "paused");
+        assert!(runtime.overlay_visible.load(Ordering::SeqCst));
+        assert_eq!(runtime.transcript.lock().unwrap().partial, "乙");
+        runtime.stop(false);
+        assert!(matches!(commands.try_recv(), Ok(session::Command::Finish)));
+        assert!(!runtime.writing_paused());
+    }
+
+    #[test]
     fn appearance_saves_and_reloads_during_an_active_session() {
         let runtime = runtime();
         let (stop, _receive) = mpsc::unbounded_channel();
-        *runtime.active.lock().unwrap() = Some(Active { stop, id: 17 });
+        *runtime.active.lock().unwrap() = Some(Active {
+            stop,
+            id: 17,
+            input: InputState::Preview,
+        });
         let mut config = runtime.config.lock().unwrap().clone();
         config.appearance.anchor = "bottom-right".into();
         config.appearance.offset_x = -37;
@@ -268,7 +393,11 @@ mod tests {
     fn active_session_still_rejects_other_setting_changes_without_writing() {
         let runtime = runtime();
         let (stop, _receive) = mpsc::unbounded_channel();
-        *runtime.active.lock().unwrap() = Some(Active { stop, id: 18 });
+        *runtime.active.lock().unwrap() = Some(Active {
+            stop,
+            id: 18,
+            input: InputState::Preview,
+        });
         let previous = runtime.config.lock().unwrap().clone();
         let mut draft = previous.clone();
         draft.appearance.anchor = "center".into();

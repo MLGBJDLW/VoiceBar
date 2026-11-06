@@ -253,7 +253,7 @@ mod win {
 }
 /// A session's insertion point. Integer handles keep this snapshot Copy + Send;
 /// it never reactivates a window or guesses a new target after focus changes.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InputTarget {
     window: isize,
     focus: isize,
@@ -288,9 +288,6 @@ impl InputTarget {
             }
         })
     }
-    pub fn window(&self) -> isize {
-        self.window
-    }
     pub fn process_id(&self) -> u32 {
         self.pid
     }
@@ -314,7 +311,9 @@ impl InputTarget {
     /// invalid immediately; native hook handles are retired on their own thread.
     pub fn release(&self) {
         #[cfg(windows)]
-        realtime::release(self);
+        if self.unavailable.is_none() {
+            realtime::release(self);
+        }
     }
 }
 
@@ -1109,17 +1108,6 @@ pub fn process_id(target: isize) -> u32 {
         0
     }
 }
-pub fn target_valid(target: isize) -> bool {
-    #[cfg(windows)]
-    {
-        target != 0 && unsafe { win::IsWindow(target as win::Hwnd) != 0 } && foreground() == target
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = target;
-        false
-    }
-}
 pub fn modifiers_released() -> bool {
     #[cfg(windows)]
     {
@@ -1132,13 +1120,11 @@ pub fn modifiers_released() -> bool {
         true
     }
 }
-pub fn type_text(target: isize, text: &str) -> Result<(), String> {
+pub fn type_text(target: &InputTarget, text: &str) -> Result<(), String> {
     if text.is_empty() {
         return Ok(());
     }
-    if !target_valid(target) {
-        return Err("输入焦点已切换，自动写入暂停；结束后可复制文本。".into());
-    }
+    target.validate()?;
     if !modifiers_released() {
         return Err("请松开 Ctrl / Alt / Shift 后重试输入。".into());
     }
@@ -1148,7 +1134,8 @@ pub fn type_text(target: isize, text: &str) -> Result<(), String> {
         // using the last packet's character. Pace complete Unicode scalars so
         // WinUI/IME consumers can process each character before the next one.
         for ch in text.chars() {
-            if !target_valid(target) || !modifiers_released() {
+            target.validate()?;
+            if !modifiers_released() {
                 return Err("输入过程中焦点或按键状态变化，已停止写入。".into());
             }
             let mut utf16 = [0u16; 2];
@@ -1173,7 +1160,7 @@ pub fn type_text(target: isize, text: &str) -> Result<(), String> {
             win::send(&inputs)?;
             std::thread::sleep(std::time::Duration::from_millis(8));
         }
-        Ok(())
+        target.validate()
     }
     #[cfg(not(windows))]
     {
@@ -1251,9 +1238,10 @@ fn set_clipboard(text: &str) -> Result<u32, String> {
         }
     }
 }
-pub fn paste_text(target: isize, text: &str) -> Result<(), String> {
-    if !target_valid(target) || !modifiers_released() {
-        return Err("焦点已变化或快捷键尚未松开，未执行粘贴。".into());
+pub fn paste_text(target: &InputTarget, text: &str) -> Result<(), String> {
+    target.validate()?;
+    if !modifiers_released() {
+        return Err("快捷键尚未松开，未执行粘贴。".into());
     }
     #[cfg(windows)]
     {
@@ -1264,18 +1252,25 @@ pub fn paste_text(target: isize, text: &str) -> Result<(), String> {
             return type_text(target, text);
         }
         let sequence = set_clipboard(text)?;
-        if !target_valid(target) {
-            if let Some(t) = original {
-                let _ = set_clipboard(&t);
+        let paste = target.validate().and_then(|_| {
+            if !modifiers_released() {
+                return Err("快捷键尚未松开，未执行粘贴。".into());
             }
-            return Err("粘贴前焦点变化，已恢复剪贴板。".into());
+            win::send(&[
+                win::key(0x11, false),
+                win::key(0x56, false),
+                win::key(0x56, true),
+                win::key(0x11, true),
+            ])
+        });
+        if let Err(error) = paste {
+            if unsafe { win::GetClipboardSequenceNumber() } == sequence {
+                if let Some(t) = original {
+                    let _ = set_clipboard(&t);
+                }
+            }
+            return Err(error);
         }
-        win::send(&[
-            win::key(0x11, false),
-            win::key(0x56, false),
-            win::key(0x56, true),
-            win::key(0x11, true),
-        ])?;
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(700));
             if unsafe { win::GetClipboardSequenceNumber() } == sequence {
@@ -1810,14 +1805,14 @@ mod tests {
         physical_keys(&[(0x11, false), (0x12, false), (0x10, false), (0x87, false)]);
         let session = Session(InputTarget::capture(HOTKEY));
         let target = &session.0;
-        assert_eq!(target.window(), fixture.window);
+        assert_eq!(target.window, fixture.window);
         assert_eq!(target.focus, fixture.edit);
         physical_keys(&[(0x11, true), (0x12, true), (0x10, true), (0x87, true)]);
         target
             .validate()
             .expect("start shortcut release invalidated capture");
 
-        type_text(target.window(), "前文 ").unwrap();
+        type_text(target, "前文 ").unwrap();
         realtime_edit(target, "", "hel", "unicode").unwrap();
         fixture.expect_text("前文 hel");
         let clipboard_sequence = unsafe { win::GetClipboardSequenceNumber() };
@@ -1850,6 +1845,12 @@ mod tests {
         // Same control, changed caret: refuse before the first Backspace.
         physical_keys(&[(0x25, false), (0x25, true)]);
         assert!(!target.valid());
+        assert!(type_text(target, "must not appear").is_err());
+        assert!(paste_text(target, "must not appear").is_err());
+        assert_eq!(
+            unsafe { win::GetClipboardSequenceNumber() },
+            clipboard_sequence
+        );
         assert!(realtime_edit(target, "完成", "must not appear", "unicode").is_err());
         fixture.expect_text("前文 hello 完成");
 

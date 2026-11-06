@@ -447,22 +447,46 @@ async fn run_inner(
     let task_id = uuid::Uuid::new_v4().simple().to_string();
     let kind = config.kind.as_str();
     match kind {
-        "dashscope"=>send_json(&mut sink,json!({"header":{"action":"run-task","task_id":task_id,"streaming":"duplex"},"payload":{"task_group":"audio","task":"asr","function":"recognition","model":config.model,"parameters":{"format":"pcm","sample_rate":16000,"disfluency_removal_enabled":false},"input":{}}})).await?,
-        "funasr"=>{
-            let weights:serde_json::Map<String,Value>=hotwords.iter().map(|w|(w.clone(),json!(20))).collect();
+        "dashscope" => {
+            let mut parameters = json!({
+                "format": "pcm", "sample_rate": 16000, "disfluency_removal_enabled": false
+            });
+            // Paraformer v2 times out on silent PCM unless heartbeat is enabled.
+            if matches!(
+                config.model.as_str(),
+                "paraformer-realtime-v2" | "paraformer-realtime-8k-v2"
+            ) {
+                parameters["heartbeat"] = json!(true);
+            }
+            send_json(
+                &mut sink,
+                json!({
+                    "header": {"action":"run-task","task_id":task_id,"streaming":"duplex"},
+                    "payload": {"task_group":"audio","task":"asr","function":"recognition",
+                                "model":config.model,"parameters":parameters,"input":{}}
+                }),
+            )
+            .await?;
+        }
+        "funasr" => {
+            let weights: serde_json::Map<String, Value> =
+                hotwords.iter().map(|w| (w.clone(), json!(20))).collect();
             send_json(&mut sink,json!({"mode":"2pass","chunk_size":[5,10,5],"chunk_interval":10,"audio_fs":16000,"wav_name":"voicebar","wav_format":"pcm","is_speaking":true,"itn":true,"hotwords":Value::Object(weights).to_string()})).await?;
         }
-        "openai-realtime"=>{
-            let mut tr=json!({"model":config.model,"prompt":hotwords.join(", ")});
-            if !config.language.is_empty()&&config.language!="auto"{
-                if config.model=="gpt-live-transcribe"{tr["languages"]=json!([config.language]);}
-                else{tr["language"]=json!(config.language);}
+        "openai-realtime" => {
+            let mut tr = json!({"model":config.model,"prompt":hotwords.join(", ")});
+            if !config.language.is_empty() && config.language != "auto" {
+                if config.model == "gpt-live-transcribe" {
+                    tr["languages"] = json!([config.language]);
+                } else {
+                    tr["language"] = json!(config.language);
+                }
             }
             // gpt-live-transcribe streams deltas before commit and requires
             // turn_detection=null. End-of-speech is handled locally by Capture.
             send_json(&mut sink,json!({"type":"session.update","session":{"type":"transcription","audio":{"input":{"format":{"type":"audio/pcm","rate":24000},"transcription":tr,"turn_detection":null}}}})).await?;
         }
-        _=>{}
+        _ => {}
     }
     let mut text = TextState::default();
     let mut ready = kind != "dashscope";
@@ -519,7 +543,13 @@ async fn run_inner(
                 match message {
                     Some(Ok(Message::Text(raw)))=>{
                         let v:Value=serde_json::from_str(&raw).context("识别服务返回无效 JSON")?;
-                        if kind=="dashscope"&&v["header"]["event"]=="task-started"{ready=true;}
+                        if kind == "dashscope" {
+                            match v["header"]["event"].as_str() {
+                                Some("task-started") => ready = true,
+                                Some("result-generated") if v["payload"]["output"]["sentence"]["heartbeat"] == true => continue,
+                                _ => {}
+                            }
+                        }
                         let done=text.parse(kind,&v,ending)?;text.emit(&output);
                         if done{
                             // End-of-utterance may arrive before stop (e.g. XFYun VAD).
@@ -686,6 +716,104 @@ mod tests {
         assert_eq!(&bytes[..4], b"RIFF");
         assert_eq!(bytes.len(), 50);
         assert_eq!(u32::from_le_bytes(bytes[24..28].try_into().unwrap()), 16000);
+    }
+    #[tokio::test]
+    async fn dashscope_v2_keeps_transcribing_across_a_quiet_interval() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let config = ProviderConfig {
+            kind: "dashscope".into(),
+            endpoint: format!("ws://{}", listener.local_addr().unwrap()),
+            model: "paraformer-realtime-v2".into(),
+            api_key: "fixture-key".into(),
+            ..ProviderConfig::default()
+        };
+        let server = async {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            let setup = ws.next().await.unwrap().unwrap();
+            let setup: Value = serde_json::from_str(setup.to_text().unwrap()).unwrap();
+            let heartbeat = setup["payload"]["parameters"]["heartbeat"] == true;
+            send_json(&mut ws, json!({"header":{"event":"task-started"}}))
+                .await
+                .unwrap();
+            let result = |sentence: Value| {
+                json!({
+                    "header": {"event":"result-generated"},
+                    "payload": {"output":{"sentence":sentence}}
+                })
+            };
+            assert!(ws.next().await.unwrap().unwrap().is_binary());
+            send_json(
+                &mut ws,
+                result(json!({"text":"第一段","sentence_end":false})),
+            )
+            .await
+            .unwrap();
+            // Advance by captured PCM duration so the test needs no wall-clock sleep.
+            for _ in 0..600 {
+                let packet = ws.next().await.unwrap().unwrap().into_data();
+                assert_eq!(packet.len(), 1280);
+                assert!(packet.iter().all(|&b| b == 0));
+            }
+            if !heartbeat {
+                send_json(&mut ws, json!({"header":{
+                    "event":"task-failed","error_code":"TaskTimeout","error_message":"idle audio"
+                }})).await.unwrap();
+                return;
+            }
+            send_json(&mut ws, result(json!({"text":"","heartbeat":true})))
+                .await
+                .unwrap();
+            send_json(
+                &mut ws,
+                result(json!({"text":"第一段。","begin_time":0,"sentence_end":true})),
+            )
+            .await
+            .unwrap();
+            assert!(ws.next().await.unwrap().unwrap().is_binary());
+            send_json(&mut ws, result(json!({"text":"继续","sentence_end":false})))
+                .await
+                .unwrap();
+            let finish = ws.next().await.unwrap().unwrap();
+            assert!(finish.to_text().unwrap().contains("finish-task"));
+            send_json(
+                &mut ws,
+                result(json!({"text":"继续。","begin_time":25000,"sentence_end":true})),
+            )
+            .await
+            .unwrap();
+            send_json(&mut ws, json!({"header":{"event":"task-finished"}}))
+                .await
+                .unwrap();
+        };
+        let (tx, rx) = mpsc::channel(16);
+        let (out, mut results) = mpsc::unbounded_channel::<Transcript>();
+        let client = async {
+            tx.send(vec![1000; 640]).await.unwrap();
+            for _ in 0..600 {
+                tx.send(vec![0; 640]).await.unwrap();
+            }
+            tx.send(vec![1000; 640]).await.unwrap();
+            let mut saw_first = false;
+            while let Some(update) = results.recv().await {
+                let text = format!("{}{}", update.stable, update.partial);
+                assert!(!saw_first || !text.is_empty(), "heartbeat erased live text");
+                saw_first |= text == "第一段";
+                if text == "第一段。继续" {
+                    assert!(saw_first);
+                    drop(tx);
+                    return;
+                }
+            }
+            panic!("the provider stopped before the next utterance");
+        };
+        let (_, run_result, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(server, run(config, vec![], rx, out), client)
+        })
+        .await
+        .unwrap();
+        run_result.unwrap();
+        assert_eq!(results.try_recv().unwrap().stable, "第一段。继续。");
     }
     #[tokio::test]
     async fn openai_live_streams_before_stop_then_commits_final_revision() {
