@@ -233,6 +233,7 @@ pub struct AppConfig {
     pub appearance: Appearance,
     pub injection: Injection,
     pub hotkey: String,
+    pub hold_to_talk: bool,
     pub cancel_hotkey: String,
     pub mic_device: String,
     pub max_recording_secs: u64,
@@ -255,6 +256,7 @@ impl Default for AppConfig {
             appearance: Appearance::default(),
             injection: Injection::default(),
             hotkey: HOTKEY_HINT.into(),
+            hold_to_talk: false,
             cancel_hotkey: "Escape".into(),
             mic_device: String::new(),
             max_recording_secs: 300,
@@ -654,12 +656,14 @@ mod tests {
         let defaults = AppConfig::default();
         assert!(!defaults.starts_hidden(false));
         assert!(!defaults.silent_start);
+        assert!(!defaults.hold_to_talk);
         assert_eq!(defaults.silence_stop_secs, 0);
 
         let legacy: AppConfig =
             serde_json::from_str(r#"{"autostart":true,"injection":{"mode":"final"}}"#).unwrap();
         assert!(legacy.autostart);
         assert!(!legacy.silent_start);
+        assert!(!legacy.hold_to_talk);
         assert_eq!(legacy.silence_stop_secs, 0);
         assert_eq!(legacy.injection.mode, "final");
         assert!(
