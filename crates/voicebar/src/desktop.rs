@@ -1140,8 +1140,9 @@ mod native {
                     .settings_requested
                     .store(true, Ordering::Release),
                 TOGGLE => {
-                    let active = self.runtime.active.lock().unwrap().is_some();
-                    self.action(if active { STOP } else { START });
+                    if let Err(error) = self.runtime.toggle() {
+                        self.runtime.set_status("error", error);
+                    }
                 }
                 START => {
                     if self.runtime.active.lock().unwrap().is_none() {
@@ -1196,7 +1197,16 @@ mod native {
                 let menu = menu::Popup::new(
                     self.window.hwnd,
                     dpi_x,
-                    tray_menu(active, visible, has_text, &config.hotkey),
+                    tray_menu(
+                        active,
+                        visible,
+                        has_text,
+                        if self.runtime.writing_paused() {
+                            ""
+                        } else {
+                            &config.hotkey
+                        },
+                    ),
                 )?;
                 SetForegroundWindow(self.window.hwnd);
                 self.window.events.active_menu.set(&menu);
@@ -1250,14 +1260,18 @@ mod native {
             separator(),
             item(
                 if active { STOP } else { START },
-                format!(
-                    "{}\t{hotkey}",
-                    if active {
-                        "结束录音"
-                    } else {
-                        "开始录音"
-                    }
-                ),
+                if hotkey.is_empty() {
+                    "结束录音".into()
+                } else {
+                    format!(
+                        "{}\t{hotkey}",
+                        if active {
+                            "结束录音"
+                        } else {
+                            "开始录音"
+                        }
+                    )
+                },
                 true,
             ),
             item(CANCEL, "取消本次录音".into(), active),

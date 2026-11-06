@@ -28,6 +28,8 @@ use chrome::*;
 const TITLEBAR_HEIGHT: f32 = 42.;
 const CONTROL_HOVER: u32 = 0x2a303b;
 const CLOSE_HOVER: u32 = 0xb6434c;
+// Secondary labels also sit over bright desktop content on the translucent bar.
+const OVERLAY_SECONDARY: u32 = 0xc8d1df;
 const TABS: [&str; 4] = ["工作台", "外观与动效", "识别引擎", "输入与启动"];
 const PROVIDERS: [(&str, &str, &str, &str); 7] = [
     (
@@ -83,7 +85,7 @@ const FIELDS: &[(&str, &str)] = &[
     ("maxRecordingSecs", "录音上限 / 秒"),
     ("silenceStopSecs", "停顿自动结束 / 秒（0 = 关闭）"),
     ("appearance.accent", "声浪颜色 / #RRGGBB"),
-    ("appearance.opacity", "背景透明度 / 0.3–1"),
+    ("appearance.opacity", "浮框背景不透明度 / 0.3–1"),
     ("appearance.intensity", "声浪强度 / 0–3"),
     ("appearance.scale", "语音条大小 / 0.65–1.8"),
     ("appearance.offsetX", "水平偏移 / px"),
@@ -589,7 +591,7 @@ impl Settings {
             status.state, status.message, text.stable, text.partial
         );
         if snapshot != self.last_snapshot
-            || status.state == "listening"
+            || matches!(status.state.as_str(), "listening" | "paused")
             || self.demo_until.is_some()
             || self.voice.moving
         {
@@ -1089,7 +1091,7 @@ impl Settings {
                 .child(self.choices("injection.mode",&[("realtime","边说边写"),("stable","确认片段逐段写入"),("final","结束后统一写入"),("preview","只预览 · 手动复制")],cx))
                 .when(self.draft.injection.mode!="realtime",|card|card.child(self.choices("injection.method",&[("unicode","Unicode 按键"),("clipboard","剪贴板粘贴")],cx)))
                 .child(note(match self.draft.injection.mode.as_str(){
-                    "realtime"=>"实时写入固定使用 Unicode 按键，只修订本次临时文本。移动光标、切换控件或手动编辑后暂停自动写入，完整结果仍可复制。",
+                    "realtime"=>"实时写入固定使用 Unicode 按键，只修订本次临时文本。移动光标、切换控件或手动编辑后暂停写入；按快捷键可从当前光标继续，完整结果可复制。",
                     "stable"=>"只写入服务已确认的片段。校对结果保留为预览，不自动改写已输入的文字。",
                     "final"=>"结束后统一写入，开启校对时写入校对后的结果。",
                     _=>"识别文字只显示在语音条中，请手动复制。",
@@ -1492,7 +1494,7 @@ impl VoiceMotion {
             self.utterance = utterance;
             self.previous_state.clear();
         }
-        let mut audio = if state == "listening"
+        let mut audio = if matches!(state.as_str(), "listening" | "paused")
             && level
                 .updated_at
                 .is_some_and(|t| now.duration_since(t) < Duration::from_millis(250))
@@ -1534,7 +1536,11 @@ impl VoiceMotion {
         let visual = self.motion.advance(
             &audio,
             dt,
-            demo.is_some() || matches!(state.as_str(), "listening" | "processing" | "done"),
+            demo.is_some()
+                || matches!(
+                    state.as_str(),
+                    "listening" | "paused" | "processing" | "done"
+                ),
             reduced,
             self.pulse_id,
         );
@@ -1629,7 +1635,10 @@ impl Overlay {
         }
     }
     fn tick(&mut self, cx: &mut Context<Self>) {
-        let listening = self.runtime.status.lock().unwrap().state == "listening";
+        let listening = matches!(
+            self.runtime.status.lock().unwrap().state.as_str(),
+            "listening" | "paused"
+        );
         if listening && self.listening_since.is_none() {
             self.listening_since = self
                 .runtime
@@ -1667,6 +1676,14 @@ impl Render for Overlay {
         let mut config = self.runtime.config.lock().unwrap().clone();
         let preview = self.runtime.overlay_preview();
         let active = self.runtime.active.lock().unwrap().is_some();
+        let paused = self.runtime.writing_paused();
+        let (action_label, action_icon) = if paused {
+            ("继续", Glyph::Mic)
+        } else if active {
+            ("停止", Glyph::Stop)
+        } else {
+            ("收起", Glyph::Check)
+        };
         let preview_only = preview.is_some() && !active;
         if let Some(preview) = &preview {
             config.appearance = preview.appearance.clone();
@@ -1695,10 +1712,10 @@ impl Render for Overlay {
         let scale = (f32::from(viewport.width) / 560.)
             .min(f32::from(viewport.height) / 210.)
             .clamp(0.1, 1.8);
-        let color = if preview_only {
-            MINT
-        } else {
-            state_color(&status.state)
+        let color = match (preview_only, status.state.as_str()) {
+            (true, _) => MINT,
+            (false, "error") => 0xffc1cd,
+            (false, state) => state_color(state),
         };
         let alpha = (config.appearance.opacity.clamp(0.3, 1.) * 255.) as u32;
         let label = if preview_only {
@@ -1722,9 +1739,10 @@ impl Render for Overlay {
                     .p(px(14. * scale))
                     .rounded(px(20. * scale))
                     .border_1()
-                    .border_color(rgba(0xb4c6d039))
+                    .border_color(rgba(0xc8d1df59))
+                    // A second full-card layer (including a box shadow) adds its alpha
+                    // to the fill on GPUI's Windows renderer and can hide the desktop.
                     .bg(rgba((PANEL << 8) | alpha))
-                    .when(config.appearance.combine, |c| c.shadow_lg())
                     .overflow_hidden()
                     .child(
                         self.probe("header", row())
@@ -1760,7 +1778,7 @@ impl Render for Overlay {
                                 div()
                                     .flex_shrink_0()
                                     .font_family("Consolas")
-                                    .text_color(rgb(MUTED))
+                                    .text_color(rgb(OVERLAY_SECONDARY))
                                     .text_size(px(11. * scale))
                                     .child(format!("{:02}:{:02}", seconds / 60, seconds % 60)),
                             )
@@ -1779,26 +1797,31 @@ impl Render for Overlay {
                                     .text_size(px(11. * scale))
                                     .cursor_pointer()
                                     .hover(|s| s.bg(rgba(0xffffff20)))
-                                    .child(icon(
-                                        if active { Glyph::Stop } else { Glyph::Check },
-                                        color,
-                                        12. * scale,
-                                    ))
-                                    .child(if active { "停止" } else { "收起" })
-                                    .on_click(cx.listener(|this, _, _, _| {
-                                        if this.runtime.active.lock().unwrap().is_some() {
-                                            this.runtime.stop(false);
-                                        } else {
+                                    .child(icon(action_icon, color, 12. * scale))
+                                    .child(action_label)
+                                    .on_click(cx.listener(move |this, _, _, _| {
+                                        if paused {
+                                            this.runtime.resume();
+                                        } else if active {
+                                            this.runtime.toggle_active();
+                                        } else if this.runtime.active.lock().unwrap().is_none() {
                                             this.runtime.dismiss_overlay();
                                         }
                                     })),
                             )
                             .child(
-                                icon_button("overlay-close", Glyph::Close, MUTED, 28. * scale)
-                                    .on_click(cx.listener(|this, _, _, _| {
+                                icon_button(
+                                    "overlay-close",
+                                    Glyph::Close,
+                                    OVERLAY_SECONDARY,
+                                    28. * scale,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, _| {
                                         this.runtime.stop(true);
                                         this.runtime.dismiss_overlay();
-                                    })),
+                                    },
+                                )),
                             ),
                     )
                     .child(
@@ -1811,7 +1834,7 @@ impl Render for Overlay {
                             .overflow_y_scroll()
                             .text_size(px(15. * scale))
                             .line_height(px(24. * scale))
-                            .when(text.is_empty(), |s| s.text_color(rgb(MUTED)))
+                            .when(text.is_empty(), |s| s.text_color(rgb(OVERLAY_SECONDARY)))
                             .child(if text.is_empty() {
                                 "把想说的话，变成眼前的文字。".to_string()
                             } else {
@@ -1832,7 +1855,7 @@ impl Render for Overlay {
                                     .overflow_y_scroll()
                                     .text_size(px(10. * scale))
                                     .line_height(px(15. * scale))
-                                    .text_color(rgb(MUTED))
+                                    .text_color(rgb(OVERLAY_SECONDARY))
                                     .child(if preview_only {
                                         "10 秒后自动收起 · 不会启动录音".to_string()
                                     } else {
@@ -1877,7 +1900,7 @@ impl Render for Overlay {
                                     .text_size(px(11. * scale))
                                     .cursor_pointer()
                                     .hover(|s| s.bg(rgba(0xffffff1c)))
-                                    .child(icon(Glyph::Settings, MUTED, 13. * scale))
+                                    .child(icon(Glyph::Settings, OVERLAY_SECONDARY, 13. * scale))
                                     .child("设置")
                                     .on_click(cx.listener(|this, _, _, _| {
                                         this.runtime

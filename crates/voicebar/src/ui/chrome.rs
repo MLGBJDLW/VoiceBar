@@ -121,6 +121,7 @@ pub(super) fn state_label(state: &str) -> &'static str {
     match state {
         "connecting" => "正在连接",
         "listening" => "正在聆听",
+        "paused" => "写入暂停",
         "processing" => "正在整理",
         "done" => "识别完成",
         "error" => "需要处理",
@@ -130,7 +131,7 @@ pub(super) fn state_label(state: &str) -> &'static str {
 pub(super) fn state_color(state: &str) -> u32 {
     match state {
         "error" => DANGER,
-        "connecting" | "processing" => WARNING,
+        "connecting" | "processing" | "paused" => WARNING,
         _ => MINT,
     }
 }

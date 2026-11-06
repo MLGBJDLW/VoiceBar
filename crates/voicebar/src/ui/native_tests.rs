@@ -46,6 +46,7 @@ unsafe extern "system" {
 }
 #[link(name = "gdi32")]
 unsafe extern "system" {
+    fn GetPixel(dc: isize, x: i32, y: i32) -> u32;
     fn CreateCompatibleDC(dc: isize) -> isize;
     fn CreateCompatibleBitmap(dc: isize, width: i32, height: i32) -> isize;
     fn SelectObject(dc: isize, object: isize) -> isize;
@@ -71,6 +72,89 @@ unsafe extern "system" {
     ) -> i32;
     fn DeleteObject(object: isize) -> i32;
     fn DeleteDC(dc: isize) -> i32;
+}
+
+/// Two known colors behind the real overlay distinguish desktop composition from
+/// a solid dark fill or an accidentally invisible card without capturing the desktop.
+struct ContrastBackdrop;
+impl Render for ContrastBackdrop {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .size_full()
+            .child(div().flex_1().h_full().bg(rgb(0)))
+            .child(div().flex_1().h_full().bg(rgb(0xffffff)))
+    }
+}
+
+#[test]
+#[ignore = "samples a visible test-owned overlay over a black and white backdrop"]
+fn translucent_overlay_composites_the_desktop() {
+    let samples = Arc::new(Mutex::new(Vec::new()));
+    let results = samples.clone();
+    Application::new().run(move |cx| {
+        let config = AppConfig::default();
+        let runtime = Arc::new(Runtime::new(config.clone(), Default::default()));
+        let backdrop = cx
+            .open_window(
+                WindowOptions {
+                    kind: WindowKind::PopUp,
+                    focus: false,
+                    show: false,
+                    ..Default::default()
+                },
+                |_, cx| cx.new(|_| ContrastBackdrop),
+            )
+            .unwrap();
+        let background_hwnd = backdrop.update(cx, |_, w, _| native_handle(w)).unwrap();
+        let overlay = open_overlay(runtime.clone(), cx).unwrap();
+        let hwnd = overlay.update(cx, |_, w, _| native_handle(w)).unwrap();
+        cx.spawn(async move |cx| {
+            desktop::configure_overlay(background_hwnd, &config).unwrap();
+            desktop::show_window(background_hwnd, false);
+            desktop::configure_overlay(hwnd, &config).unwrap();
+            desktop::show_window(hwnd, false);
+            for opacity in [config.appearance.opacity, 1.0] {
+                runtime.config.lock().unwrap().appearance.opacity = opacity;
+                backdrop.update(cx, |_, w, _| w.refresh()).unwrap();
+                overlay.update(cx, |_, w, _| w.refresh()).unwrap();
+                cx.background_executor()
+                    .timer(Duration::from_millis(500))
+                    .await;
+                unsafe {
+                    let mut rect = Rect::default();
+                    assert_ne!(GetWindowRect(hwnd, &mut rect), 0);
+                    let dc = GetDC(0);
+                    let width = rect.right - rect.left;
+                    // Sample clear card fill between the caption and footer.
+                    let y = rect.top + (rect.bottom - rect.top) * 2 / 3;
+                    let left = GetPixel(dc, rect.left + width / 4, y);
+                    let right = GetPixel(dc, rect.left + width * 3 / 4, y);
+                    ReleaseDC(0, dc);
+                    results.lock().unwrap().push((left, right));
+                }
+            }
+            let _ = cx.update(|cx| cx.quit());
+        })
+        .detach();
+    });
+    let values = samples.lock().unwrap();
+    assert_eq!(values.len(), 2);
+    eprintln!("default and opaque samples over black/white (COLORREF): {values:x?}");
+    for shift in [0, 8, 16] {
+        let channel = |color: u32| ((color >> shift) & 0xffu32) as i32;
+        let (dark, light) = values[0];
+        let transmission = channel(light) - channel(dark);
+        assert!(
+            (45..=75).contains(&transmission),
+            "desktop transmission: {transmission}/255"
+        );
+        let (dark, light) = values[1];
+        assert!(
+            (channel(light) - channel(dark)).abs() <= 2,
+            "opaque card leaked background"
+        );
+    }
 }
 
 /// Capture only a known test-owned window's exact screen rectangle. PrintWindow
@@ -235,7 +319,11 @@ fn themed_tray_menu_renders_and_keeps_native_keyboard_behavior() {
 
     // Render the recording state using a synthetic session only.
     let (stop, _receiver) = tokio::sync::mpsc::unbounded_channel();
-    *runtime.active.lock().unwrap() = Some(crate::runtime::Active { stop, id: 1 });
+    *runtime.active.lock().unwrap() = Some(crate::runtime::Active {
+        stop,
+        id: 1,
+        input: crate::runtime::InputState::Preview,
+    });
     runtime.set_transcript("菜单主题验证文字", "", false);
     desktop.preview_context_menu(1180, 760);
     wait_for(|| desktop.preview_menu_open() && owned_menu() != 0);
@@ -343,7 +431,7 @@ fn hidden_overlay_renders_and_repositions() {
                 runtime.set_transcript("把想说的话，变成眼前的文字。这个长文本用于验证浮框在不同缩放比例下仍然可以完整滚动阅读。", "继续表达，让思绪自然流动。", false);
                 runtime.set_status("listening", "输入位置已变化或检测到手动编辑，自动写入暂停；识别继续，可复制结果。".repeat(4));
                 let (stop, _receiver) = tokio::sync::mpsc::unbounded_channel();
-                *runtime.active.lock().unwrap() = Some(crate::runtime::Active { stop, id: 1 });
+                *runtime.active.lock().unwrap() = Some(crate::runtime::Active { stop, id: 1, input: crate::runtime::InputState::Preview });
                 for scale in [0.65, 1.0, 1.8] {
                     for anchor in ["top", "bottom-right"] {
                         let mut config = runtime.config.lock().unwrap().clone();

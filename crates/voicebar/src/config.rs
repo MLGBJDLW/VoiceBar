@@ -198,7 +198,7 @@ impl Default for Appearance {
             anchor: "top".into(),
             effect: "ribbon".into(),
             accent: "#a7e8cf".into(),
-            opacity: 0.94,
+            opacity: 0.76,
             intensity: 1.0,
             scale: 1.0,
             motion: "full".into(),
@@ -524,12 +524,28 @@ pub fn config_path() -> Result<PathBuf, String> {
         .ok_or_else(|| "无法定位当前用户的配置目录".to_string())?;
     Ok(root.join("studio.voicebar.desktop").join("settings.json"))
 }
+// Earlier settings always stored the nearly opaque default as an explicit value.
+// Only migrate that value in legacy files so a later choice of 0.94 round-trips.
+#[derive(Serialize, Deserialize)]
+struct StoredConfig {
+    #[serde(rename = "schemaVersion", default)]
+    version: u32,
+    #[serde(flatten)]
+    config: AppConfig,
+}
+
 pub fn load(path: &Path) -> Result<AppConfig, String> {
     if !path.exists() {
         return Ok(AppConfig::default());
     }
-    let mut c: AppConfig = serde_json::from_slice(&std::fs::read(path).map_err(|e| e.to_string())?)
+    let StoredConfig {
+        version,
+        config: mut c,
+    } = serde_json::from_slice(&std::fs::read(path).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
+    if version == 0 && c.appearance.opacity == 0.94 {
+        c.appearance.opacity = Appearance::default().opacity;
+    }
     for key in [
         &mut c.provider.api_key,
         &mut c.provider.api_secret,
@@ -560,7 +576,11 @@ pub fn save(path: &Path, c: &AppConfig) -> Result<(), String> {
     let temp = parent.join("settings.next.json");
     std::fs::write(
         &temp,
-        serde_json::to_vec_pretty(&disk).map_err(|e| e.to_string())?,
+        serde_json::to_vec_pretty(&StoredConfig {
+            version: 1,
+            config: disk,
+        })
+        .map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())?;
     crate::platform::atomic_replace(&temp, path)
@@ -572,6 +592,25 @@ mod tests {
     #[test]
     fn valid_defaults_and_local_transport() {
         assert!(AppConfig::default().validate().is_ok());
+    }
+    #[test]
+    fn legacy_overlay_default_is_translucent_and_explicit_opacity_round_trips() {
+        let dir = std::env::temp_dir().join(format!("voicebar-opacity-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("settings.json");
+        let mut config = AppConfig::default();
+        config.appearance.opacity = 0.94;
+        std::fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+        assert_eq!(
+            load(&path).unwrap().appearance.opacity,
+            Appearance::default().opacity
+        );
+        save(&path, &config).unwrap();
+        assert_eq!(load(&path).unwrap(), config);
+        config.appearance.opacity = 1.0;
+        std::fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+        assert_eq!(load(&path).unwrap(), config);
+        std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
     fn hotkeys_are_canonical_and_must_differ() {

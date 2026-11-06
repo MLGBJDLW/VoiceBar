@@ -2,7 +2,13 @@ use crate::{audio, config::AppConfig, platform, providers, runtime::Runtime};
 use std::{sync::Arc, time::Duration};
 use tokio::sync::mpsc;
 
-struct InputGuard(platform::InputTarget);
+pub struct InputGuard(pub platform::InputTarget);
+
+pub enum Command {
+    Finish,
+    Cancel,
+    Resume(InputGuard, crate::runtime::Transcript),
+}
 impl Drop for InputGuard {
     fn drop(&mut self) {
         self.0.release();
@@ -10,22 +16,57 @@ impl Drop for InputGuard {
 }
 
 struct Delivery {
-    target: platform::InputTarget,
+    target: InputGuard,
+    protected: String,
+    resumed: bool,
     delivered: String,
     paused: bool,
     internal: bool,
 }
 impl Delivery {
-    fn new(target: platform::InputTarget) -> Self {
-        let internal = target.process_id() == std::process::id();
+    fn new(target: InputGuard) -> Self {
+        let internal = target.0.process_id() == std::process::id();
         Self {
             target,
+            protected: String::new(),
+            resumed: false,
             delivered: String::new(),
             paused: false,
             internal,
         }
     }
+    fn resume(&mut self, target: InputGuard, observed: &crate::runtime::Transcript, mode: &str) {
+        self.target = target;
+        self.paused = false;
+        self.resumed = true;
+        self.delivered.clear();
+        // Only text injected at the newly selected caret may be revised. A
+        // final-only session has not yet injected anything.
+        self.protected = match mode {
+            "realtime" => format!("{}{}", observed.stable, observed.partial),
+            "stable" => observed.stable.clone(),
+            _ => String::new(),
+        };
+    }
+
+    fn writable_suffix<'a>(&mut self, text: &'a str) -> Option<&'a str> {
+        if let Some(suffix) = text.strip_prefix(&self.protected) {
+            return Some(suffix);
+        }
+        // The recognizer rewrote text from before the resume boundary. Seal
+        // this revision and continue on its next extension; the full revision
+        // remains available in the overlay.
+        if !self.protected.starts_with(text) {
+            self.protected = text.into();
+            self.delivered.clear();
+        }
+        None
+    }
+
     async fn append(&mut self, text: &str, method: &str) -> Result<(), String> {
+        let Some(text) = self.writable_suffix(text) else {
+            return Ok(());
+        };
         if self.internal || self.paused || text == self.delivered {
             return Ok(());
         }
@@ -37,7 +78,7 @@ impl Delivery {
         if suffix.is_empty() {
             return Ok(());
         }
-        if !self.target.valid() {
+        if !self.target.0.valid() {
             self.paused = true;
             return Err("输入焦点已切换，自动写入暂停；文本保留在语音条中。".into());
         }
@@ -48,14 +89,14 @@ impl Delivery {
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
-        let target = self.target.window();
+        let target = self.target.0;
         let fragment = suffix.to_string();
         let clipboard = method == "clipboard";
         let result = tokio::task::spawn_blocking(move || {
             if clipboard {
-                platform::paste_text(target, &fragment)
+                platform::paste_text(&target, &fragment)
             } else {
-                platform::type_text(target, &fragment)
+                platform::type_text(&target, &fragment)
             }
         })
         .await
@@ -68,6 +109,9 @@ impl Delivery {
         Ok(())
     }
     async fn replace(&mut self, text: &str, method: &str) -> Result<(), String> {
+        let Some(text) = self.writable_suffix(text) else {
+            return Ok(());
+        };
         if self.internal || self.paused || text == self.delivered {
             return Ok(());
         }
@@ -81,7 +125,7 @@ impl Delivery {
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
-        let target = self.target;
+        let target = self.target.0;
         let method = method.to_string();
         let result = tokio::task::spawn_blocking(move || {
             platform::realtime_edit(&target, &remove, &insert, &method)
@@ -121,11 +165,9 @@ pub async fn run(
     config: AppConfig,
     target: platform::InputTarget,
     id: u64,
-    mut stop: mpsc::UnboundedReceiver<bool>,
+    mut stop: mpsc::UnboundedReceiver<Command>,
 ) {
-    let input_guard = InputGuard(target);
-    let result = execute(&runtime, &config, target, &mut stop).await;
-    drop(input_guard);
+    let result = execute(&runtime, &config, InputGuard(target), &mut stop).await;
     let auto_hide = matches!(
         &result,
         Ok(Outcome::Cancelled) | Ok(Outcome::Done { keep: false, .. })
@@ -178,8 +220,8 @@ enum Outcome {
 async fn execute(
     runtime: &Arc<Runtime>,
     config: &AppConfig,
-    target: platform::InputTarget,
-    stop: &mut mpsc::UnboundedReceiver<bool>,
+    target: InputGuard,
+    stop: &mut mpsc::UnboundedReceiver<Command>,
 ) -> Result<Outcome, String> {
     let (audio_tx, audio_rx) = mpsc::channel(256);
     let (output_tx, mut output_rx) = mpsc::unbounded_channel();
@@ -240,12 +282,16 @@ async fn execute(
     let mut finished = false;
     loop {
         tokio::select! {
-            stop_result=stop.recv()=>{
-                let cancel=stop_result.unwrap_or(true);
-                capture.stop();
-                if cancel{provider.abort();return Ok(Outcome::Cancelled);}
-                break;
-            }
+            command=stop.recv()=>match command {
+                Some(Command::Resume(target, observed)) => {
+                    delivery.resume(target, &observed, &config.injection.mode);
+                    // A transcript may have arrived after the button/shortcut
+                    // but before this command was consumed by the session.
+                    deliver_update(runtime, config, &mut delivery, &current).await;
+                }
+                Some(Command::Finish) => break,
+                Some(Command::Cancel) | None => return Ok(Outcome::Cancelled),
+            },
             _=&mut max=>{capture.stop();break;}
             result=&mut silence_rx,if silence_stop_secs>0=>{
                 // Closing capture drains the provider's audio queue and follows
@@ -255,9 +301,9 @@ async fn execute(
             }
             Some(e)=errors_rx.recv()=>{capture.stop();provider.abort();return Err(e);}
             _=focus.tick()=>{
-                if !delivery.internal&&!delivery.paused&&!delivery.target.valid(){
+                if config.injection.mode != "preview" && !delivery.internal && !delivery.paused && !delivery.target.0.valid() {
                     delivery.paused=true;
-                    runtime.set_status("listening","输入位置已变化或检测到手动编辑，自动写入暂停；识别继续，可复制结果");
+                    runtime.pause_writing(delivery.target.0, "输入位置已变化或检测到手动编辑。");
                 }
             }
             Some(update)=output_rx.recv()=>{
@@ -271,6 +317,9 @@ async fn execute(
         }
     }
     capture.stop();
+    if let Some(active) = runtime.active.lock().unwrap().as_mut() {
+        active.input = crate::runtime::InputState::Finishing;
+    }
     runtime.set_status("processing", "正在收尾并确认最后的文字…");
     if !finished {
         let wait = if ["openai-compatible", "whispercpp"].contains(&config.provider.kind.as_str()) {
@@ -282,7 +331,7 @@ async fn execute(
         tokio::pin!(deadline);
         loop {
             tokio::select! {
-                command=stop.recv()=>{if command.unwrap_or(true){provider.abort();return Ok(Outcome::Cancelled);}}
+                command=stop.recv()=>{if matches!(command, Some(Command::Cancel) | None) {provider.abort();return Ok(Outcome::Cancelled);}}
                 _=&mut deadline=>{provider.abort();return Err("识别收尾超时，已保留当前文本，请复制后重试。".into());}
                 Some(update)=output_rx.recv()=>{update_transcript(runtime,config,&mut delivery,&mut current,update).await;}
                 result=&mut provider=>{result.map_err(|e|e.to_string())?.map_err(|e|format!("识别服务错误：{e}"))?;break;}
@@ -312,7 +361,7 @@ async fn execute(
         runtime.set_status("processing", "正在校对文字…");
         let corrected = tokio::select! {
             result=correct(config,&original)=>result,
-            _=async {loop{if stop.recv().await.unwrap_or(true){break;}}}=>return Ok(Outcome::Cancelled),
+            _=async {loop{if matches!(stop.recv().await, Some(Command::Cancel) | None){break;}}}=>return Ok(Outcome::Cancelled),
         };
         match corrected {
             Ok(text) => {
@@ -336,7 +385,7 @@ async fn execute(
         } else if delivery.paused {
             message = "识别完成 · 焦点已变化，请复制结果".into();
         } else {
-            message = "已写入原输入位置".into();
+            message = "已写入选定的输入位置".into();
         }
     } else if config.injection.mode == "realtime" {
         message = if delivery.internal {
@@ -364,11 +413,17 @@ async fn execute(
     } else {
         message = "识别完成 · 仅预览，可复制文字".into();
     }
+    let resumed_stream =
+        delivery.resumed && matches!(config.injection.mode.as_str(), "stable" | "realtime");
+    if resumed_stream && !delivery.paused {
+        message = "识别完成 · 已接续写入，完整结果可复制".into();
+    }
     if let Some(e) = correction_warning {
         message = format!("{message}；校对失败，保留原文：{e}");
     }
     // Keep un-injected results/errors visible for manual recovery.
-    let keep = delivery.paused
+    let keep = resumed_stream
+        || delivery.paused
         || delivery.internal
         || config.injection.mode == "preview"
         || config.correction.enabled
@@ -383,20 +438,29 @@ async fn update_transcript(
     update: providers::Transcript,
 ) {
     runtime.set_transcript(&update.stable, &update.partial, false);
+    deliver_update(runtime, config, delivery, &update).await;
+    *current = update;
+}
+
+async fn deliver_update(
+    runtime: &Runtime,
+    config: &AppConfig,
+    delivery: &mut Delivery,
+    update: &providers::Transcript,
+) {
     if config.injection.mode == "realtime" {
         let text = format!("{}{}", update.stable, update.partial);
         if let Err(error) = delivery.replace(&text, &config.injection.method).await {
-            runtime.set_status("listening", error);
+            runtime.pause_writing(delivery.target.0, &error);
         }
     } else if config.injection.mode == "stable" {
         if let Err(e) = delivery
             .append(&update.stable, &config.injection.method)
             .await
         {
-            runtime.set_status("listening", e);
+            runtime.pause_writing(delivery.target.0, &e);
         }
     }
-    *current = update;
 }
 async fn correct(config: &AppConfig, text: &str) -> Result<String, String> {
     let mut builder = reqwest::Client::builder()
@@ -441,6 +505,41 @@ async fn correct(config: &AppConfig, text: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resume_only_revises_text_owned_at_the_new_caret() {
+        let target = || InputGuard(platform::InputTarget::capture("invalid test shortcut"));
+        let mut delivery = Delivery::new(target());
+        delivery.delivered = "甲".into();
+        delivery.paused = true;
+        let observed = crate::runtime::Transcript {
+            stable: "甲".into(),
+            partial: "乙".into(),
+            ..Default::default()
+        };
+        delivery.resume(target(), &observed, "realtime");
+        assert!(!delivery.paused);
+        assert!(delivery.delivered.is_empty());
+        assert_eq!(delivery.writable_suffix("甲乙"), Some(""));
+        assert_eq!(delivery.writable_suffix("甲乙丙"), Some("丙"));
+        delivery.delivered = "丙".into();
+        let suffix = delivery.writable_suffix("甲乙丁").unwrap();
+        let edit = tail_edit(&delivery.delivered, suffix);
+        assert_eq!((edit.remove, edit.insert), ("丙", "丁"));
+
+        // A temporary retraction must not replay the frozen prefix. A new
+        // hypothesis crossing the boundary cannot authorize any backspaces.
+        assert_eq!(delivery.writable_suffix("甲"), None);
+        assert_eq!(delivery.writable_suffix("甲乙丁"), Some("丁"));
+        assert_eq!(delivery.writable_suffix("甲已丁"), None);
+        assert!(delivery.delivered.is_empty());
+        assert_eq!(delivery.writable_suffix("甲已丁戊"), Some("戊"));
+
+        delivery.resume(target(), &observed, "stable");
+        assert_eq!(delivery.writable_suffix("甲乙"), Some("乙"));
+        delivery.resume(target(), &observed, "final");
+        assert_eq!(delivery.writable_suffix("甲乙"), Some("甲乙"));
+    }
 
     #[test]
     fn realtime_diff_handles_append_correction_retraction_and_unicode() {
