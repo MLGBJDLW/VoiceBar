@@ -26,11 +26,11 @@ mod shortcuts;
 use chrome::*;
 
 const TITLEBAR_HEIGHT: f32 = 42.;
-const CONTROL_HOVER: u32 = 0x2a303b;
+const CONTROL_HOVER: u32 = 0x25272b;
 const CLOSE_HOVER: u32 = 0xb6434c;
 // Secondary labels also sit over bright desktop content on the translucent bar.
 const OVERLAY_SECONDARY: u32 = 0xc8d1df;
-const TABS: [&str; 4] = ["工作台", "外观与动效", "识别引擎", "输入与启动"];
+const TABS: [&str; 4] = ["工作台", "外观", "识别引擎", "输入与启动"];
 const PROVIDERS: [(&str, &str, &str, &str); 7] = [
     (
         "funasr",
@@ -159,38 +159,21 @@ fn window_control(id: &'static str, area: WindowControlArea, maximized: bool) ->
         )
 }
 
-fn settings_titlebar(window: &Window) -> Div {
+/// 右上角的窗口按钮条：左侧是可拖动区域，右侧是最小化 / 最大化 / 关闭。
+/// 标题栏和页面融为一体（没有单独的深色条），这是现代桌面应用的常见做法。
+fn window_controls(window: &Window) -> Div {
     div()
         .flex()
         .w_full()
         .h(px(TITLEBAR_HEIGHT))
         .flex_shrink_0()
-        .bg(rgb(BG))
-        .border_b_1()
-        .border_color(rgb(LINE))
         .child(
-            row()
+            div()
                 .id("window-drag-region")
                 .window_control_area(WindowControlArea::Drag)
                 .h_full()
                 .flex_1()
-                .min_w_0()
-                .px_5()
-                .gap_3()
-                .child(
-                    div().flex().items_center().gap(px(3.)).children(
-                        [8., 14., 20., 14., 8.].into_iter().map(|height| {
-                            div().w(px(2.)).h(px(height)).rounded_full().bg(rgb(MINT))
-                        }),
-                    ),
-                )
-                .child(
-                    div()
-                        .text_size(px(13.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child("VoiceBar"),
-                )
-                .child(note("桌面语音工作空间")),
+                .min_w_0(),
         )
         .child(window_control(
             "window-minimize",
@@ -404,30 +387,23 @@ impl Settings {
             .as_str()
             .unwrap_or("")
             .to_owned();
-        row()
-            .flex_wrap()
-            .gap_2()
-            .children(options.iter().map(|(value, label)| {
-                let value = value.to_string();
-                let selected = value == current;
-                button(
-                    SharedString::from(format!("{path}-{value}")),
-                    label.to_string(),
-                )
-                .when(selected, |button| {
-                    button
-                        .border_color(rgb(0x4a7568))
-                        .text_color(rgb(MINT))
-                        .bg(rgb(TINT))
-                })
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.choice(path, Value::String(value.clone()));
-                    if path.starts_with("appearance.") {
-                        this.preview_overlay(cx);
-                    }
-                    cx.notify();
-                }))
+        // 互斥选项统一用"分段选择器"，一眼能看出当前选中的是哪一个。
+        row().child(segmented().children(options.iter().map(|(value, label)| {
+            let value = value.to_string();
+            let selected = value == current;
+            segment(
+                SharedString::from(format!("{path}-{value}")),
+                label.to_string(),
+                selected,
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.choice(path, Value::String(value.clone()));
+                if path.starts_with("appearance.") {
+                    this.preview_overlay(cx);
+                }
+                cx.notify();
             }))
+        })))
     }
     fn toggle(
         &self,
@@ -443,14 +419,19 @@ impl Settings {
             .unwrap_or(false);
         row()
             .justify_between()
-            .py_3()
-            .border_b_1()
-            .border_color(rgb(LINE))
+            .gap_6()
+            .py_1()
             .child(
                 column()
-                    .gap_1()
+                    .gap(px(2.))
                     .flex_1()
-                    .child(div().text_size(px(14.)).child(label))
+                    .min_w_0()
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(label),
+                    )
                     .child(note(description)),
             )
             .child(Switch::new(path).checked(checked).on_click(cx.listener(
@@ -714,48 +695,55 @@ impl Settings {
         column()
             .gap_5()
             .child(
+                // 首屏主卡片：左边是"怎么用"，右边是声浪舞台。
                 card()
-                    .p_6()
-                    .gap_5()
-                    .bg(rgb(0x1b2729))
-                    .border_color(rgb(0x344b47))
+                    .p_0()
+                    .gap_0()
+                    .overflow_hidden()
                     .child(
-                        row()
-                            .justify_between()
-                            .child(note(provider).text_color(rgb(0x9bb8af)))
-                            .child(badge(
-                                state_label(&status.state),
-                                state_color(&status.state),
-                            )),
-                    )
-                    .child(
-                        row()
-                            .items_center()
-                            .gap_6()
+                        // 不加 items_center：flex 默认把左右两栏拉成一样高。
+                        div()
+                            .flex()
+                            .flex_shrink_0()
                             .child(
                                 column()
                                     .flex_1()
+                                    .min_w_0()
+                                    .p_6()
                                     .gap_4()
                                     .child(
-                                        div()
-                                            .text_size(px(if wide { 30. } else { 25. }))
-                                            .line_height(px(39.))
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .child(if saved.hold_to_talk {
-                                                "按住说话，松开结束"
-                                            } else {
-                                                "按一下开始，再按一下结束"
-                                            }),
+                                        row()
+                                            .gap_2()
+                                            .child(badge(
+                                                state_label(&status.state),
+                                                state_color(&status.state),
+                                            ))
+                                            .child(note(provider).text_color(rgb(SUBTLE))),
                                     )
                                     .child(
-                                        note("先点选输入位置，再使用录音快捷键。")
-                                            .text_color(rgb(0xafc4bf)),
+                                        column()
+                                            .gap_1()
+                                            .child(
+                                                div()
+                                                    .text_size(px(20.))
+                                                    .line_height(px(28.))
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .child(if saved.hold_to_talk {
+                                                        "按住说话，松开结束"
+                                                    } else {
+                                                        "按一下开始，再按一下结束"
+                                                    }),
+                                            )
+                                            .child(note(
+                                                "先点选要输入的位置，再按下快捷键开始说话。",
+                                            )),
                                     )
                                     .child(keycaps(&saved.hotkey))
                                     .child(
                                         row()
                                             .flex_wrap()
                                             .gap_2()
+                                            .pt_1()
                                             .child(
                                                 primary(
                                                     "record",
@@ -767,8 +755,8 @@ impl Settings {
                                                 )
                                                 .child(icon(
                                                     if active { Glyph::Stop } else { Glyph::Mic },
-                                                    0x10251d,
-                                                    15.,
+                                                    ON_MINT,
+                                                    14.,
                                                 ))
                                                 .on_click(cx.listener(|this, _, _, cx| {
                                                     if this.runtime.active.lock().unwrap().is_some()
@@ -781,38 +769,59 @@ impl Settings {
                                                     cx.notify();
                                                 })),
                                             )
+                                            .child(button("overview-preview", "预览浮框").on_click(
+                                                cx.listener(|this, _, _, cx| {
+                                                    this.preview_overlay(cx)
+                                                }),
+                                            ))
                                             .child(
-                                                button("engine-guide", "配置识别服务")
-                                                    .bg(rgba(0xffffff08))
-                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                button("engine-guide", "配置识别服务").on_click(
+                                                    cx.listener(|this, _, _, cx| {
                                                         this.tab = 2;
                                                         cx.notify();
-                                                    })),
+                                                    }),
+                                                ),
                                             ),
                                     ),
                             )
                             .when(wide, |r| {
                                 r.child(
                                     column()
-                                        .w(px(210.))
-                                        .h(px(142.))
+                                        .w(px(240.))
+                                        .flex_shrink_0()
                                         .justify_center()
                                         .items_center()
                                         .gap_3()
-                                        .rounded(px(16.))
-                                        .bg(rgba(0x101d2080))
+                                        .bg(rgb(INSET))
+                                        .border_l_1()
+                                        .border_color(rgb(LINE))
                                         .child(
                                             waveform(self.appearance(cx), visual)
-                                                .w(px(180.))
-                                                .h(px(70.)),
+                                                .w(px(196.))
+                                                .h(px(72.)),
+                                        )
+                                        .child(
+                                            note("让声音看得见")
+                                                .text_size(px(11.))
+                                                .text_color(rgb(SUBTLE)),
                                         ),
                                 )
                             }),
                     )
                     .child(
-                        note("试用时，录音会发往已配置的识别服务，文字显示在下方。")
-                            .text_size(px(11.))
-                            .text_color(rgb(0x9bb1aa)),
+                        row()
+                            .px_6()
+                            .py_3()
+                            .gap_2()
+                            .border_t_1()
+                            .border_color(rgb(LINE))
+                            .bg(rgb(BG))
+                            .child(icon(Glyph::Spark, SUBTLE, 13.))
+                            .child(
+                                note("试用时，录音会发往已配置的识别服务，文字显示在下方。")
+                                    .text_size(px(11.))
+                                    .text_color(rgb(SUBTLE)),
+                            ),
                     ),
             )
             .child(
@@ -841,14 +850,14 @@ impl Settings {
                             .flex_1()
                             .min_w_0()
                             .p_4()
-                            .gap_3()
+                            .gap_2()
                             .cursor_pointer()
-                            .hover(|s| s.bg(rgb(0x202630)).border_color(rgb(0x3b4754)))
+                            .hover(|s| s.bg(rgb(RAISED)).border_color(rgb(LINE_STRONG)))
                             .child(
                                 row()
                                     .gap_2()
-                                    .child(icon(glyph, MUTED, 16.))
-                                    .child(note(label)),
+                                    .child(icon(glyph, SUBTLE, 14.))
+                                    .child(note(label).text_size(px(11.))),
                             )
                             .child(
                                 row()
@@ -863,7 +872,7 @@ impl Settings {
                                             .font_weight(FontWeight::MEDIUM)
                                             .child(value),
                                     )
-                                    .child(icon(Glyph::Arrow, MUTED, 13.)),
+                                    .child(icon(Glyph::Arrow, SUBTLE, 13.)),
                             )
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.tab = tab;
@@ -881,7 +890,6 @@ impl Settings {
                             .child(
                                 row()
                                     .gap_2()
-                                    .child(icon(Glyph::Spark, MINT, 17.))
                                     .child(title("本次识别"))
                                     .when(transcript.corrected, |r| r.child(badge("已校对", MINT))),
                             )
@@ -908,12 +916,14 @@ impl Settings {
                             .w_full()
                             .min_w_0()
                             .p_4()
-                            .rounded(px(10.))
+                            .rounded(px(9.))
+                            .border_1()
+                            .border_color(rgb(LINE))
                             .bg(rgb(INSET))
                             .overflow_y_scroll()
                             .text_size(px(14.))
-                            .line_height(px(25.))
-                            .when(text.is_empty(), |s| s.text_color(rgb(MUTED)))
+                            .line_height(px(24.))
+                            .when(text.is_empty(), |s| s.text_color(rgb(SUBTLE)))
                             .child(if text.is_empty() {
                                 "等待识别文字…".to_string()
                             } else {
@@ -998,8 +1008,12 @@ impl Settings {
                     let id = item.id;
                     row()
                         .gap_3()
-                        .p_2()
+                        .py_2()
+                        .pl_3()
+                        .pr_2()
                         .rounded(px(8.))
+                        .border_1()
+                        .border_color(rgb(LINE))
                         .bg(rgb(INSET))
                         .child(
                             column()
@@ -1043,7 +1057,9 @@ impl Settings {
             .w(px(220.))
             .flex_shrink_0()
             .p_3()
-            .rounded(px(12.))
+            .rounded(px(10.))
+            .border_1()
+            .border_color(rgb(LINE))
             .bg(rgb(INSET))
             .children(anchors.chunks(3).map(|items| {
                 row().gap_2().children(items.iter().map(|(anchor, label)| {
@@ -1052,10 +1068,10 @@ impl Settings {
                     button(SharedString::from(format!("anchor-{anchor}")), *label)
                         .flex_1()
                         .px_0()
-                        .h(px(34.))
+                        .h(px(32.))
                         .when(selected, |b| {
                             b.bg(rgb(TINT))
-                                .border_color(rgb(0x527d6e))
+                                .border_color(rgb(TINT_LINE))
                                 .text_color(rgb(MINT))
                         })
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -1072,7 +1088,7 @@ impl Settings {
                     .mx_auto()
                     .mt_2()
                     .rounded_full()
-                    .bg(rgb(0x3b4553)),
+                    .bg(rgb(LINE_STRONG)),
             );
         column()
             .gap_5()
@@ -1108,20 +1124,25 @@ impl Settings {
                                     .min_w_0()
                                     .gap_2()
                                     .p_3()
-                                    .rounded(px(11.))
+                                    .rounded(px(10.))
                                     .border_1()
-                                    .bg(rgb(INSET))
-                                    .border_color(rgb(if selected { 0x527d6e } else { LINE }))
+                                    .bg(rgb(if selected { TINT } else { INSET }))
+                                    .border_color(rgb(if selected { TINT_LINE } else { LINE }))
                                     .cursor_pointer()
-                                    .hover(|s| s.bg(rgb(0x222c32)))
+                                    .hover(|s| s.border_color(rgb(LINE_STRONG)))
                                     .child(waveform(sample, frame).w_full().h(px(40.)))
                                     .child(
                                         div()
                                             .text_size(px(12.))
+                                            .font_weight(FontWeight::MEDIUM)
                                             .text_color(rgb(if selected { MINT } else { TEXT }))
                                             .child(label),
                                     )
-                                    .child(note(description).text_size(px(10.)))
+                                    .child(
+                                        note(description)
+                                            .text_size(px(11.))
+                                            .text_color(rgb(SUBTLE)),
+                                    )
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.choice(
                                             "appearance.effect",
@@ -1151,7 +1172,7 @@ impl Settings {
                                     .py_1()
                                     .rounded(px(7.))
                                     .cursor_pointer()
-                                    .hover(|s| s.bg(rgb(0x2b3340)))
+                                    .hover(|s| s.bg(rgb(RAISED)))
                                     .child(
                                         div()
                                             .size(px(16.))
@@ -1226,19 +1247,20 @@ impl Settings {
                         row()
                             .gap_3()
                             .child(note("动效帧率"))
-                            .children([30u32, 60].map(|fps| {
-                                button(("fps", fps as usize), format!("{fps} fps"))
-                                    .when(self.draft.appearance.fps == fps, |b| {
-                                        b.bg(rgb(TINT))
-                                            .border_color(rgb(0x527d6e))
-                                            .text_color(rgb(MINT))
-                                    })
-                                    .on_click(cx.listener(move |this, _, _, cx| {
+                            .child(segmented().children([30u32, 60].map(|fps| {
+                                segment(
+                                    ("fps", fps as usize),
+                                    format!("{fps} fps"),
+                                    self.draft.appearance.fps == fps,
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
                                         this.draft.appearance.fps = fps;
                                         this.dirty = true;
                                         cx.notify();
-                                    }))
-                            })),
+                                    },
+                                ))
+                            }))),
                     )
                     .child(note(
                         "减少动态会冻结连续运动，保留音量反馈；强度仅改变视觉幅度。",
@@ -1248,74 +1270,117 @@ impl Settings {
     fn engine_panel(&self, cx: &Context<Self>) -> Div {
         let options: Vec<_> = PROVIDERS.iter().map(|p| (p.0, p.1)).collect();
         let selected = self.draft.provider.kind.clone();
-        let provider_choices =
-            row()
-                .flex_wrap()
-                .gap_3()
-                .children(options.iter().map(|(kind, label)| {
-                    let kind = kind.to_string();
-                    let selected = kind == selected;
-                    let local = matches!(kind.as_str(), "funasr" | "whispercpp");
-                    let batch = matches!(kind.as_str(), "openai-compatible" | "whispercpp");
-                    column()
-                        .id(SharedString::from(format!("provider-{kind}")))
-                        .w(relative(0.48))
-                        .p_4()
-                        .gap_2()
-                        .rounded(px(10.))
+        let cards: Vec<_> = options
+            .iter()
+            .map(|(kind, label)| {
+                let kind = kind.to_string();
+                let selected = kind == selected;
+                let local = matches!(kind.as_str(), "funasr" | "whispercpp");
+                let batch = matches!(kind.as_str(), "openai-compatible" | "whispercpp");
+                // 每个服务是一张紧凑的"单选卡"：左边圆点表示是否选中。
+                row()
+                    .id(SharedString::from(format!("provider-{kind}")))
+                    .flex_1()
+                    .min_w_0()
+                    .px_3()
+                    .py(px(10.))
+                    .gap_3()
+                    .items_start()
+                    .rounded(px(9.))
+                    .border_1()
+                    .bg(rgb(if selected { TINT } else { INSET }))
+                    .border_color(rgb(if selected { TINT_LINE } else { LINE }))
+                    .cursor_pointer()
+                    .hover(move |s| {
+                        if selected {
+                            s
+                        } else {
+                            s.border_color(rgb(LINE_STRONG)).bg(rgb(RAISED))
+                        }
+                    })
+                    .child(
+                        div()
+                            .mt(px(3.))
+                            .size(px(14.))
+                            .flex_shrink_0()
+                            .rounded_full()
+                            .border_1()
+                            .border_color(rgb(if selected { MINT } else { LINE_STRONG }))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .when(selected, |d| {
+                                d.child(div().size(px(6.)).rounded_full().bg(rgb(MINT)))
+                            }),
+                    )
+                    .child(
+                        column()
+                            .flex_1()
+                            .min_w_0()
+                            .gap(px(2.))
+                            .child(
+                                div()
+                                    .text_ellipsis()
+                                    .whitespace_nowrap()
+                                    .text_size(px(13.))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(rgb(if selected { MINT } else { TEXT }))
+                                    .child(label.to_string()),
+                            )
+                            .child(
+                                note(format!(
+                                    "{} · {}",
+                                    if local {
+                                        "本地服务"
+                                    } else {
+                                        "云端服务"
+                                    },
+                                    if batch {
+                                        "结束后转写"
+                                    } else {
+                                        "实时流式"
+                                    }
+                                ))
+                                .text_size(px(11.))
+                                .text_color(rgb(SUBTLE)),
+                            ),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if this.draft.provider.kind != kind {
+                            let p = PROVIDERS.iter().find(|p| p.0 == kind).unwrap();
+                            this.draft.provider.kind = kind.clone();
+                            this.draft.provider.endpoint = p.2.into();
+                            this.draft.provider.model = p.3.into();
+                            this.draft.provider.api_key.clear();
+                            this.draft.provider.api_secret.clear();
+                            this.set_field("provider.endpoint", p.2, window, cx);
+                            this.set_field("provider.model", p.3, window, cx);
+                            this.set_field("provider.apiKey", "", window, cx);
+                            this.set_field("provider.apiSecret", "", window, cx);
+                            this.dirty = true;
+                        }
+                        cx.notify();
+                    }))
+            })
+            .collect();
+        // 两张卡一行，每张 flex_1 平分宽度，左右边缘就能和外层卡片对齐。
+        let mut provider_choices = column().gap_2();
+        let mut cards = cards.into_iter();
+        while let Some(first) = cards.next() {
+            let line = row().items_start().gap_2().child(first);
+            provider_choices = provider_choices.child(match cards.next() {
+                Some(second) => line.child(second),
+                // 单数时补一个空位，保持最后一张卡也只占半宽。
+                // 空位带同样的内边距和边框（透明），两边才会算成一样宽。
+                None => line.child(
+                    div()
+                        .flex_1()
+                        .px_3()
                         .border_1()
-                        .bg(rgb(if selected { TINT } else { INSET }))
-                        .border_color(rgb(if selected { 0x527d6e } else { LINE }))
-                        .cursor_pointer()
-                        .hover(|s| s.border_color(rgb(0x527d6e)))
-                        .child(
-                            row()
-                                .justify_between()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .text_ellipsis()
-                                        .text_size(px(12.))
-                                        .text_color(rgb(if selected { MINT } else { TEXT }))
-                                        .child(label.to_string()),
-                                )
-                                .when(selected, |r| r.child(icon(Glyph::Check, MINT, 14.))),
-                        )
-                        .child(
-                            note(format!(
-                                "{} · {}",
-                                if local {
-                                    "本地服务"
-                                } else {
-                                    "云端服务"
-                                },
-                                if batch {
-                                    "结束后转写"
-                                } else {
-                                    "实时流式"
-                                }
-                            ))
-                            .text_size(px(10.)),
-                        )
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            if this.draft.provider.kind != kind {
-                                let p = PROVIDERS.iter().find(|p| p.0 == kind).unwrap();
-                                this.draft.provider.kind = kind.clone();
-                                this.draft.provider.endpoint = p.2.into();
-                                this.draft.provider.model = p.3.into();
-                                this.draft.provider.api_key.clear();
-                                this.draft.provider.api_secret.clear();
-                                this.set_field("provider.endpoint", p.2, window, cx);
-                                this.set_field("provider.model", p.3, window, cx);
-                                this.set_field("provider.apiKey", "", window, cx);
-                                this.set_field("provider.apiSecret", "", window, cx);
-                                this.dirty = true;
-                            }
-                            cx.notify();
-                        }))
-                }));
+                        .border_color(transparent_black()),
+                ),
+            });
+        }
         column()
             .gap_5()
             .child(
@@ -1371,7 +1436,11 @@ impl Settings {
         let selected = self.value("micDevice", cx);
         let select_button = |id: ElementId, label: String, name: String| {
             button(id, label)
-                .when(selected == name, |b| b.bg(rgb(TINT)).text_color(rgb(MINT)))
+                .when(selected == name, |b| {
+                    b.bg(rgb(TINT))
+                        .border_color(rgb(TINT_LINE))
+                        .text_color(rgb(MINT))
+                })
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.set_field("micDevice", &name, window, cx)
                 }))
@@ -1428,13 +1497,18 @@ impl Settings {
                         .gap_3()
                         .child(note("输入电平"))
                         .child(
-                            div().flex_1().h(px(7.)).rounded_full().bg(rgb(LINE)).child(
-                                div()
-                                    .w(relative(level as f32 / 100.))
-                                    .h_full()
-                                    .rounded_full()
-                                    .bg(rgb(MINT)),
-                            ),
+                            div()
+                                .flex_1()
+                                .h(px(6.))
+                                .rounded_full()
+                                .bg(rgb(INSET))
+                                .child(
+                                    div()
+                                        .w(relative(level as f32 / 100.))
+                                        .h_full()
+                                        .rounded_full()
+                                        .bg(rgb(MINT)),
+                                ),
                         )
                         .child(note(format!("{level}%")).w(px(36.))),
                 )
@@ -1508,7 +1582,9 @@ impl Settings {
             .child(
                 div()
                     .h(px(118.))
-                    .rounded(px(12.))
+                    .rounded(px(10.))
+                    .border_1()
+                    .border_color(rgb(LINE))
                     .bg(rgb(INSET))
                     .flex()
                     .items_center()
@@ -1553,96 +1629,79 @@ impl Render for Settings {
             _ => self.input_panel(cx),
         };
         let descriptions = [
-            "把声音变成文字，让注意力留在想法上。",
-            "调出属于你的色彩、节奏与桌面位置。",
-            "连接你信任的识别服务，保持表达流畅。",
-            "设置顺手的快捷键，让 VoiceBar 随时就位。",
+            "开始一次听写，查看识别结果与应用状态。",
+            "调整语音条的效果、配色与桌面位置。",
+            "选择识别服务，并可在识别后自动校对。",
+            "快捷键、麦克风、写入方式与启动行为。",
         ];
-        let navigation = [
-            (Glyph::Home, "记录与预览"),
-            (Glyph::Wave, "浮框、颜色与动效"),
-            (Glyph::Engine, "服务连接与文本校对"),
-            (Glyph::Keyboard, "快捷键与桌面行为"),
-        ];
-        let content = row()
-            .flex_1()
-            .min_h_0()
-            .w_full()
+        let glyphs = [Glyph::Home, Glyph::Wave, Glyph::Engine, Glyph::Keyboard];
+        let hotkey = self.runtime.config.lock().unwrap().hotkey.clone();
+
+        // ── 左侧导航 ─────────────────────────────────────────
+        let sidebar = column()
+            .w(px(if wide { 232. } else { 212. }))
+            .flex_shrink_0()
+            .h_full()
             .gap_0()
-            .items_start()
-            .bg(rgb(BG))
-            .text_color(rgb(TEXT))
-            .text_size(px(14.))
+            .bg(rgb(SIDEBAR))
+            .border_r_1()
+            .border_color(rgb(LINE))
+            .child(
+                // 侧栏顶部也是标题栏的一部分，可以拖动窗口。
+                row()
+                    .id("sidebar-drag-region")
+                    .window_control_area(WindowControlArea::Drag)
+                    .h(px(TITLEBAR_HEIGHT + 22.))
+                    .px_5()
+                    .gap(px(10.))
+                    .child(
+                        div()
+                            .size(px(26.))
+                            .rounded(px(7.))
+                            .bg(rgb(TINT))
+                            .border_1()
+                            .border_color(rgb(TINT_LINE))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(icon(Glyph::Wave, MINT, 16.)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(14.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("VoiceBar"),
+                    ),
+            )
             .child(
                 column()
-                    .w(px(if wide { 214. } else { 190. }))
-                    .flex_shrink_0()
-                    .h_full()
-                    .gap_1()
-                    .px_4()
-                    .py_5()
-                    .bg(rgb(SIDEBAR))
-                    .border_r_1()
-                    .border_color(rgb(LINE))
-                    .child(
-                        row()
-                            .px_2()
-                            .gap_3()
-                            .child(
-                                div()
-                                    .size(px(36.))
-                                    .rounded(px(11.))
-                                    .bg(rgb(TINT))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .child(icon(Glyph::Wave, MINT, 23.)),
-                            )
-                            .child(
-                                column()
-                                    .gap_0()
-                                    .child(
-                                        div()
-                                            .text_size(px(17.))
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .child("VoiceBar"),
-                                    )
-                                    .child(note("你的桌面语音伙伴").text_size(px(10.))),
-                            ),
-                    )
-                    .child(eyebrow("工作空间").px_3().mt_8().mb_3())
+                    .px_3()
+                    .gap(px(2.))
+                    .child(eyebrow("设置").px_3().pb_2())
                     .children(TABS.iter().enumerate().map(|(i, label)| {
                         let selected = self.tab == i;
                         row()
                             .id(("tab", i))
                             .w_full()
+                            .h(px(34.))
                             .px_3()
-                            .py_3()
-                            .gap_3()
-                            .rounded(px(10.))
+                            .gap(px(10.))
+                            .rounded(px(7.))
                             .cursor_pointer()
-                            .text_color(rgb(if selected { MINT } else { MUTED }))
-                            .when(selected, |s| s.bg(rgb(0x25332f)))
-                            .hover(|s| s.bg(rgb(0x222a31)))
-                            .child(icon(
-                                navigation[i].0,
-                                if selected { MINT } else { MUTED },
-                                19.,
-                            ))
-                            .child(
-                                column()
-                                    .flex_1()
-                                    .gap_1()
-                                    .child(
-                                        div()
-                                            .text_size(px(13.))
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .child(label.to_string()),
-                                    )
-                                    .child(note(navigation[i].1).text_size(px(10.)).text_color(
-                                        rgb(if selected { 0xa0b9b0 } else { 0x788394 }),
-                                    )),
-                            )
+                            .text_size(px(13.))
+                            .text_color(rgb(if selected { TEXT } else { MUTED }))
+                            .when(selected, |s| {
+                                s.bg(rgb(RAISED)).font_weight(FontWeight::MEDIUM)
+                            })
+                            .hover(move |s| {
+                                if selected {
+                                    s
+                                } else {
+                                    s.bg(rgb(PANEL)).text_color(rgb(TEXT))
+                                }
+                            })
+                            .child(icon(glyphs[i], if selected { MINT } else { MUTED }, 16.))
+                            .child(label.to_string())
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.cancel_shortcut(cx);
                                 if this.tab != i {
@@ -1651,127 +1710,40 @@ impl Render for Settings {
                                 this.tab = i;
                                 cx.notify();
                             }))
-                    }))
-                    .child(div().flex_1())
-                    .child(
-                        column()
-                            .p_3()
-                            .gap_2()
-                            .rounded(px(10.))
-                            .border_1()
-                            .border_color(rgb(LINE))
-                            .bg(rgb(0x1b2028))
-                            .child(note("随时唤起").text_size(px(11.)))
-                            .child(keycaps(&self.runtime.config.lock().unwrap().hotkey))
-                            .child(note("在输入框内开始说话").text_size(px(10.))),
-                    )
-                    .child(
-                        row()
-                            .px_2()
-                            .mt_4()
-                            .justify_between()
-                            .child(
-                                note(format!("v{}", env!("CARGO_PKG_VERSION"))).text_size(px(10.)),
-                            )
-                            .child(note("桌面版").text_size(px(10.))),
-                    ),
+                    })),
             )
+            .child(div().flex_1())
             .child(
                 column()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .gap_0()
+                    .mx_3()
+                    .p_3()
+                    .gap_2()
+                    .rounded(px(9.))
+                    .border_1()
+                    .border_color(rgb(LINE))
+                    .bg(rgb(BG))
                     .child(
                         row()
-                            .px_6()
-                            .h(px(62.))
-                            .flex_shrink_0()
-                            .justify_between()
-                            .border_b_1()
-                            .border_color(rgb(LINE))
-                            .child(
-                                row()
-                                    .gap_2()
-                                    .child(note("VoiceBar"))
-                                    .child(note("/"))
-                                    .child(div().text_size(px(12.)).child(TABS[self.tab])),
-                            )
-                            .child(
-                                row()
-                                    .gap_3()
-                                    .child(if self.dirty {
-                                        badge("有未保存的更改", WARNING)
-                                    } else {
-                                        badge("已同步", MINT)
-                                    })
-                                    .child(
-                                        primary("save", "保存更改")
-                                            .child(icon(Glyph::Check, 0x10251d, 14.))
-                                            .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
-                                    ),
-                            ),
+                            .gap_2()
+                            .child(icon(Glyph::Mic, MUTED, 13.))
+                            .child(note("随时开始听写").text_size(px(11.))),
                     )
+                    .child(keycaps(&hotkey)),
+            )
+            .child(
+                row()
+                    .px_5()
+                    .h(px(44.))
+                    .justify_between()
                     .child(
-                        column()
-                            .id(("page-scroll", self.tab))
-                            .overflow_y_scroll()
-                            .flex_1()
-                            .min_h_0()
-                            .px(px(if wide { 32. } else { 24. }))
-                            .py_6()
-                            .gap_5()
-                            .child(
-                                row()
-                                    .justify_between()
-                                    .items_start()
-                                    .gap_4()
-                                    .child(
-                                        column()
-                                            .flex_1()
-                                            .gap_2()
-                                            .child(eyebrow(
-                                                [
-                                                    "YOUR VOICE, YOUR FLOW",
-                                                    "MAKE IT YOURS",
-                                                    "CONNECTED TO YOUR VOICE",
-                                                    "ALWAYS WITHIN REACH",
-                                                ][self.tab],
-                                            ))
-                                            .child(
-                                                div()
-                                                    .text_size(px(28.))
-                                                    .line_height(px(38.))
-                                                    .font_weight(FontWeight::SEMIBOLD)
-                                                    .child(TABS[self.tab]),
-                                            )
-                                            .child(note(descriptions[self.tab])),
-                                    )
-                                    .when(self.tab == 0, |r| {
-                                        r.child(
-                                            button("overview-preview", "预览浮框")
-                                                .bg(rgb(PANEL))
-                                                .child(icon(Glyph::Wave, MUTED, 15.))
-                                                .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.preview_overlay(cx)
-                                                })),
-                                        )
-                                    }),
-                            )
-                            .when(self.tab == 1, |c| c.child(self.preview_card(visual, cx)))
-                            .child(panel)
-                            .child(div().h(px(8.))),
+                        note(format!("v{}", env!("CARGO_PKG_VERSION")))
+                            .text_size(px(11.))
+                            .text_color(rgb(SUBTLE)),
                     )
                     .child(
                         row()
-                            .px_6()
-                            .py_3()
-                            .gap_3()
-                            .flex_shrink_0()
-                            .bg(rgb(SIDEBAR))
-                            .border_t_1()
-                            .border_color(rgb(LINE))
-                            .child(div().size(px(5.)).flex_shrink_0().rounded_full().bg(rgb(
+                            .gap(px(6.))
+                            .child(div().size(px(6.)).rounded_full().bg(rgb(
                                 if self.job.is_some() {
                                     WARNING
                                 } else {
@@ -1779,22 +1751,124 @@ impl Render for Settings {
                                 },
                             )))
                             .child(
-                                note(self.message.clone())
-                                    .flex_1()
-                                    .min_w_0()
-                                    .text_size(px(11.)),
+                                note(state_label(&status.state))
+                                    .text_size(px(11.))
+                                    .text_color(rgb(SUBTLE)),
                             ),
                     ),
             );
-        column()
+
+        // ── 页面头部：标题 + 说明 + 保存 ─────────────────────
+        let header = row()
+            .w_full()
+            .max_w(px(820.))
+            .mx_auto()
+            .px(px(if wide { 40. } else { 28. }))
+            .pt_1()
+            .pb_5()
+            .flex_shrink_0()
+            .justify_between()
+            .items_end()
+            .gap_4()
+            .child(
+                column()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(px(22.))
+                            .line_height(px(30.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(TABS[self.tab]),
+                    )
+                    .child(note(descriptions[self.tab]).text_size(px(13.))),
+            )
+            .child(
+                row()
+                    .gap_3()
+                    .child(if self.dirty {
+                        badge("未保存", WARNING)
+                    } else {
+                        row()
+                            .gap(px(5.))
+                            .child(icon(Glyph::Check, SUBTLE, 13.))
+                            .child(note("已保存").text_color(rgb(SUBTLE)))
+                    })
+                    .child(
+                        if self.dirty {
+                            primary("save", "保存更改")
+                        } else {
+                            button("save", "保存")
+                        }
+                        .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
+                    ),
+            );
+
+        // ── 页面主体：限制最大宽度，长行更易读 ────────────────
+        let body = div()
+            .id(("page-scroll", self.tab))
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .overflow_y_scroll()
+            .child(
+                column()
+                    .w_full()
+                    .max_w(px(820.))
+                    .mx_auto()
+                    .px(px(if wide { 40. } else { 28. }))
+                    .pb_8()
+                    .gap_5()
+                    .when(self.tab == 1, |c| c.child(self.preview_card(visual, cx)))
+                    .child(panel),
+            );
+
+        // ── 底部状态行：最近一次操作的反馈 ───────────────────
+        let footer = row()
+            .h(px(32.))
+            .px_5()
+            .gap_2()
+            .flex_shrink_0()
+            .border_t_1()
+            .border_color(rgb(LINE))
+            .child(div().size(px(5.)).flex_shrink_0().rounded_full().bg(rgb(
+                if self.job.is_some() {
+                    WARNING
+                } else {
+                    state_color(&status.state)
+                },
+            )))
+            .child(
+                note(self.message.clone())
+                    .flex_1()
+                    .min_w_0()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .text_size(px(11.)),
+            );
+
+        row()
             .size_full()
             .gap_0()
+            .items_start()
             .overflow_hidden()
             .bg(rgb(BG))
             .text_color(rgb(TEXT))
-            .font_family("Microsoft YaHei UI")
-            .child(settings_titlebar(window))
-            .child(content)
+            .text_size(px(13.))
+            .font_family(FONT_FAMILY)
+            .child(sidebar)
+            .child(
+                column()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .gap_0()
+                    .child(window_controls(window))
+                    .child(header)
+                    .child(body)
+                    .child(footer),
+            )
     }
 }
 
@@ -2113,7 +2187,8 @@ impl Render for Overlay {
                     .p(px(14. * scale))
                     .rounded(px(20. * scale))
                     .border_1()
-                    .border_color(rgba(0xc8d1df59))
+                    // 半透明白色细边，在深色和浅色桌面上都能勾出浮框轮廓。
+                    .border_color(rgba(0xffffff2e))
                     // A second full-card layer (including a box shadow) adds its alpha
                     // to the fill on GPUI's Windows renderer and can hide the desktop.
                     .bg(rgba((PANEL << 8) | alpha))
